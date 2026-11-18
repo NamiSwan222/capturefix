@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
 namespace CaptureFix;
 
 static class Program
@@ -21,6 +24,30 @@ static class Program
             Application.Run(new MainForm(args.Length > 1 ? args[1] : "snapshot.png", delay));
             return;
         }
-        Application.Run(new MainForm(justUpdated: args.Contains("--updated")));
+        // One window at a time: two copies would fight over the capture card.
+        bool updated = args.Contains("--updated");
+        using var mutex = new Mutex(false, @"Local\CaptureFix.SingleInstance");
+        bool owned;
+        try { owned = mutex.WaitOne(updated ? 15000 : 0); }   // after an update the old copy may still be closing
+        catch (AbandonedMutexException) { owned = true; }
+        if (!owned) { ShowExisting(); return; }
+        try { Application.Run(new MainForm(justUpdated: updated)); }
+        finally { mutex.ReleaseMutex(); }
+    }
+
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int cmd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
+
+    static void ShowExisting()
+    {
+        var me = Process.GetCurrentProcess();
+        foreach (var p in Process.GetProcessesByName(me.ProcessName))
+        {
+            if (p.Id == me.Id || p.MainWindowHandle == IntPtr.Zero) continue;
+            if (IsIconic(p.MainWindowHandle)) ShowWindow(p.MainWindowHandle, 9);   // SW_RESTORE
+            SetForegroundWindow(p.MainWindowHandle);
+            return;
+        }
     }
 }
