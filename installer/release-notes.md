@@ -2,7 +2,7 @@
 
 **Fixes bad lighting with PS5 HDR.**
 
-- The HD60 X sends a PS5's HDR in *full* range, but CaptureFix assumed *limited* range. That crushed
+- The HD60 X can send a PS5's HDR in *full* range (seen in one game menu; another was limited), but CaptureFix always assumed *limited* range. That crushed
   every shadow to black and stretched the rest, so scenes looked too contrasty and the lighting was
   off. CaptureFix now reads the signal and sets the range itself.
 - It also detects HDR vs SDR from the picture, so a wrong setting (or pressing H by mistake) can no

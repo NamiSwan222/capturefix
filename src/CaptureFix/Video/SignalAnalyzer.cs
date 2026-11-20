@@ -9,8 +9,9 @@ namespace CaptureFix.Video;
 ///
 /// What the evidence looks like (luma on a 10-bit scale):
 ///  - Range: limited-range video never goes below 64 and parks black at 64. Full range puts black
-///    at 0-30. The HD60 X delivers a PS5's HDR in full range: black sits near 14 and almost no pixel
-///    is at 64. Reading that as limited range crushes every shadow.
+///    at 0-30. The HD60 X's range varies (seen: a PS5 HDR menu in full range, with black near 14 and
+///    nothing at 64, and another in limited range). Reading full range as limited crushes every
+///    shadow; reading limited as full lifts blacks to grey.
 ///  - SDR: white text, lights and highlights reach the top of the range (940, or 1023 in full range).
 ///    HDR10 keeps normal content at 200-600 and doesn't go near 900 (that would be over 5000 nits),
 ///    so seeing a handful of pixels there proves the signal is SDR. HDR is the default whenever that

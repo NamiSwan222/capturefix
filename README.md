@@ -36,9 +36,10 @@ Two things must be right or the lighting is wrong, and they differ between conso
 settings, so CaptureFix reads them from the picture ([SignalAnalyzer.cs](src/CaptureFix/Video/SignalAnalyzer.cs)):
 
 - **Brightness range.** Limited-range video never goes below 64 (10-bit) and parks black at 64; full
-  range puts black at 0-30. Measured on a real PS5 HDR frame through the HD60 X: black sits at ~14 and
-  nothing is at 64, so the card sends HDR in **full range**. Reading that as limited crushed every
-  shadow below code 64 and stretched the rest, which looks like harsh contrast and bad lighting.
+  range puts black at 0-30. It is **not fixed**: two real PS5 HDR frames through the same HD60 X were
+  full range (black at ~14, nothing at 64) in one game menu and limited range (nothing below 64) in
+  another. Assuming the wrong one either crushes every shadow below code 64 and stretches the rest
+  (harsh contrast, bad lighting), or lifts blacks to grey. So it's measured, not assumed.
 - **HDR or SDR.** SDR white text, lights and highlights reach the top of the range (940 / 1023). HDR10
   keeps normal content at 200-600 and never gets near 900 (over 5000 nits), so a few pixels up there
   prove SDR. Without that proof for 30 seconds, it's HDR.
