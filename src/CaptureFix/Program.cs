@@ -8,6 +8,8 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--rendertest") { Dump.RenderTest(args.Skip(1).ToArray()); return; }
+        if (args.Length > 0 && args[0] == "--analyze") { Dump.Analyze(args.Skip(1).ToArray()); return; }
         if (args.Length > 0 && args[0] == "--gaps") { GapProbe.Run(args.Skip(1).ToArray()); return; }
         if (args.Length > 0 && args[0] == "--hold") { Dump.Hold(args.Skip(1).ToArray()); return; }
         if (args.Length > 0 && args[0] == "--dump") { Dump.Run(args.Skip(1).ToArray()); return; }

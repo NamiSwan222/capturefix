@@ -8,8 +8,10 @@ public sealed class Profile
 {
     public string Name { get; set; } = "";
     public string? ModeKey { get; set; }          // e.g. "P010:1920x1080@60"; null = pick automatically
-    public bool HdrSignal { get; set; }
-    public bool FullRange { get; set; }
+    public int HdrMode { get; set; }               // 0 auto-detect, 1 HDR10, 2 SDR
+    public int RangeMode { get; set; }             // 0 auto-detect, 1 limited, 2 full
+    public bool LastHdr { get; set; } = true;      // what auto-detect saw last time (the starting guess)
+    public bool LastFullRange { get; set; } = true;
     public float PeakNits { get; set; } = 1000;
     public float SdrPeakNits { get; set; } = 200;
     public float Saturation { get; set; } = 1f;
@@ -63,9 +65,9 @@ public sealed class AppSettings
         if (s.Profiles.Count == 0)
         {
             // PS5 with HDR on sends HDR10 all the time, menus included.
-            s.Profiles.Add(new Profile { Name = "PS5", HdrSignal = true, PeakNits = 1000 });
+            s.Profiles.Add(new Profile { Name = "PS5", PeakNits = 1000 });
             // Switch 2 in SDR by default; press H if HDR is on in its TV settings.
-            s.Profiles.Add(new Profile { Name = "Switch 2", HdrSignal = false });
+            s.Profiles.Add(new Profile { Name = "Switch 2", LastHdr = false, LastFullRange = false });
         }
         return s;
     }

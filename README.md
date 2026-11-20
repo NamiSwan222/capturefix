@@ -22,12 +22,29 @@ If an app shows those numbers as normal SDR video, whites turn grey, blacks lift
 CaptureFix takes the card's raw pixels (Media Foundation with every converter off) and does the colour
 work itself in a GPU shader ([video.hlsl](src/CaptureFix/Shaders/video.hlsl)):
 
-1. YCbCr to RGB with the right matrix (BT.2020 for HDR, BT.709 for SDR) and range (limited / full).
+1. YCbCr to RGB with the right matrix (BT.2020 for HDR, BT.709 for SDR) and range (limited / full),
+   both **detected from the picture itself** (see below).
 2. PQ decoded to real brightness in nits.
 3. BT.2020 mapped to normal-screen colours, keeping hue for colours that don't fit.
 4. Tone mapped with the BT.2390 curve: everything below the knee stays as the game made it, and
    highlights roll off smoothly to the screen's white. Or, with an HDR monitor, the image is shown
    as real HDR (scRGB).
+
+### Automatic signal detection
+
+Two things must be right or the lighting is wrong, and they differ between consoles, modes and
+settings, so CaptureFix reads them from the picture ([SignalAnalyzer.cs](src/CaptureFix/Video/SignalAnalyzer.cs)):
+
+- **Brightness range.** Limited-range video never goes below 64 (10-bit) and parks black at 64; full
+  range puts black at 0-30. Measured on a real PS5 HDR frame through the HD60 X: black sits at ~14 and
+  nothing is at 64, so the card sends HDR in **full range**. Reading that as limited crushed every
+  shadow below code 64 and stretched the rest, which looks like harsh contrast and bad lighting.
+- **HDR or SDR.** SDR white text, lights and highlights reach the top of the range (940 / 1023). HDR10
+  keeps normal content at 200-600 and never gets near 900 (over 5000 nits), so a few pixels up there
+  prove SDR. Without that proof for 30 seconds, it's HDR.
+
+Decisions need a second or two of agreeing evidence, start from what was last seen for that console,
+and can be forced in Settings > Picture or with H (auto, always HDR, always SDR).
 
 Two tone mapping styles:
 
@@ -74,7 +91,7 @@ a time.
 | Right-click | All options |
 | F11 / double-click / Alt+Enter | Full screen (Esc to leave) |
 | 1 / 2 | PS5 / Switch 2 profile |
-| H | HDR signal on/off (if colours look washed out or too strong, press H) |
+| H | Signal: auto-detect, always HDR, always SDR |
 | S | Settings (picture, sound, video, consoles, window, keys) |
 | A | Picture settings |
 | M | Mute game audio |
@@ -84,7 +101,7 @@ a time.
 
 ## Settings (S)
 
-- **Picture:** HDR on/off, HDR colour style (Natural / Vivid), HDR brightness, HDR peak, contrast,
+- **Picture:** signal (auto / HDR / SDR), brightness range (auto / limited / full), HDR colour style (Natural / Vivid), HDR brightness, HDR peak, contrast,
   black level, colour, warmth, sharpness, gamma (2.2 / 2.4 dark room / 2.0 bright room), full range,
   real HDR on an HDR monitor.
 - **Sound:** output device, volume, mute, audio delay, restart audio.
@@ -141,6 +158,9 @@ The workflow publishes a self-contained single-file exe, builds the Inno Setup i
 The icon is drawn by [tools/make-icon.ps1](tools/make-icon.ps1).
 
 `CaptureFix.exe --dump frame.raw` saves one untouched frame from the card for colour analysis.
+`CaptureFix.exe --analyze out.txt frame.raw P010 1920 1080 3840 true true` runs the signal detector on a
+saved frame, and `CaptureFix.exe --rendertest out.png frame.raw P010 1920 1080 3840` runs it through the
+real GPU renderer in an invisible window, so colour fixes can be checked without a console or a screen.
 `CaptureFix.exe --probe out.txt` lists devices and modes, captures from each main mode and writes the
 frame rate and brightness statistics. `CaptureFix.exe --snapshot out.png` saves what the window shows
 after 4 seconds and quits.

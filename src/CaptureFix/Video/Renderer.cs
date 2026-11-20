@@ -12,8 +12,8 @@ namespace CaptureFix.Video;
 /// <summary>What the shader needs to know about the picture. Changed from the UI thread at any time.</summary>
 public sealed class ColorSettings
 {
-    public bool HdrSignal;          // the console is sending HDR10
-    public bool FullRange;
+    public int HdrMode;             // 0 detect from the picture, 1 HDR10, 2 SDR
+    public int RangeMode;           // 0 detect from the picture, 1 limited (16-235), 2 full (0-255)
     public float PeakNits = 1000;   // matches the console's HDR calibration
     public float SdrPeakNits = 200; // SDR output: brightness (lower = brighter)
     public float HdrSdrWhite = 240; // HDR output: SDR white level
@@ -71,6 +71,13 @@ public sealed class Renderer : IDisposable
     bool _monitorHdr;
 
     public ColorSettings Color { get; set; } = new();
+
+    /// <summary>Detects HDR vs SDR and limited vs full range from the incoming picture.</summary>
+    public readonly SignalAnalyzer Signal = new();
+    public bool EffectiveHdr => Color.HdrMode == 0 ? Signal.Hdr : Color.HdrMode == 1;
+    public bool EffectiveFullRange => Color.RangeMode == 0 ? Signal.FullRange : Color.RangeMode == 2;
+    /// <summary>Raised on the render thread when auto-detection changes its mind: (hdr, fullRange).</summary>
+    public event Action<bool, bool>? SignalDetected;
     public volatile VideoCapture? Source;
 
     // Stats for the overlay.
@@ -83,6 +90,7 @@ public sealed class Renderer : IDisposable
     public Renderer(IntPtr hwnd)
     {
         _hwnd = hwnd;
+        Signal.Changed += (h, f) => SignalDetected?.Invoke(h, f);
         var levels = new[] { FeatureLevel.Level_11_1, FeatureLevel.Level_11_0 };
         D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport, levels,
             out _device, out _ctx).CheckError();
@@ -146,6 +154,7 @@ public sealed class Renderer : IDisposable
                 if (frame != null)
                 {
                     Upload(frame);
+                    Signal.Analyze(frame);
                     long arrived = frame.ArrivedTicks;
                     src!.Return(frame);
                     Draw();
@@ -314,9 +323,9 @@ public sealed class Renderer : IDisposable
             var p = new ShaderParams
             {
                 Format = _texFormat == PixelFormat.YUY2 ? 1 : 0,
-                HdrIn = c.HdrSignal ? 1 : 0,
+                HdrIn = EffectiveHdr ? 1 : 0,
                 HdrOut = _hdrSwap ? 1 : 0,
-                FullRange = c.FullRange ? 1 : 0,
+                FullRange = EffectiveFullRange ? 1 : 0,
                 PeakIn = c.PeakNits, SdrPeak = c.SdrPeakNits, HdrSdrWhite = c.HdrSdrWhite,
                 TenBit = _texFormat == PixelFormat.P010 ? 1 : 0,
                 TexW = _texW, TexH = _texH, Saturation = c.Saturation,
@@ -340,6 +349,17 @@ public sealed class Renderer : IDisposable
             catch (Exception ex) { SnapshotSaved?.Invoke(snap, ex.Message); }
         }
         _swap.Present(0, PresentFlags.None);
+    }
+
+    /// <summary>Testing: draws one frame without the render thread and saves exactly what would be shown.</summary>
+    public void RenderOnce(VideoFrame f, string pngPath)
+    {
+        for (int i = 0; i < 150; i++) Signal.Analyze(f, force: true);
+        UpdateOutputMode();
+        ResizeSwapChain(); _resize = false;
+        Upload(f);
+        _snapshotPath = pngPath;   // Draw saves it just before presenting
+        Draw();
     }
 
     string? _snapshotPath;

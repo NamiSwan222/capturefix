@@ -5,6 +5,38 @@ namespace CaptureFix;
 /// <summary>"CaptureFix.exe --dump out.raw [mode-key]": saves one untouched frame from the card (for colour analysis).</summary>
 static class Dump
 {
+    /// <summary>"--rendertest out.png file.raw FORMAT W H PITCH": runs a saved frame through the real GPU renderer in an invisible window.</summary>
+    public static void RenderTest(string[] a)
+    {
+        var f = new VideoFrame
+        {
+            Data = File.ReadAllBytes(a[1]), Format = Enum.Parse<PixelFormat>(a[2]), Width = int.Parse(a[3]), Height = int.Parse(a[4]), Pitch = int.Parse(a[5]),
+        };
+        f.Length = f.Data.Length;
+        ApplicationConfiguration.Initialize();
+        using var form = new Form { ClientSize = new Size(960, 540), ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-4000, -4000) };
+        _ = form.Handle;   // create the window without showing it
+        using var r = new Renderer(form.Handle);
+        r.Resize(960, 540);
+        r.Color = new ColorSettings();
+        r.RenderOnce(f, a[0]);
+    }
+
+    /// <summary>"--analyze out.txt file.raw FORMAT W H PITCH hdrGuess fullGuess": runs the signal detector on a saved frame.</summary>
+    public static void Analyze(string[] a)
+    {
+        var fmt = Enum.Parse<PixelFormat>(a[2]);
+        var f = new VideoFrame
+        {
+            Data = File.ReadAllBytes(a[1]), Format = fmt, Width = int.Parse(a[3]), Height = int.Parse(a[4]), Pitch = int.Parse(a[5]),
+        };
+        f.Length = f.Data.Length;
+        var an = new SignalAnalyzer();
+        an.Reset(bool.Parse(a[6]), bool.Parse(a[7]));
+        for (int i = 0; i < 150; i++) an.Analyze(f, force: true);
+        File.WriteAllText(a[0], $"{(an.Hdr ? "HDR" : "SDR")} {(an.FullRange ? "full" : "limited")} (black {an.BlackCode}, white {an.WhiteCode})");
+    }
+
     /// <summary>"--hold mode-key seconds": streams video (discarding frames) to test load on the card.</summary>
     public static void Hold(string[] args)
     {

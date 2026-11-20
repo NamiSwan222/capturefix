@@ -1,7 +1,15 @@
-## CaptureFix 1.0.1
+## CaptureFix 1.0.2
 
-- Opening CaptureFix while it's already running now brings the open window to the front, instead of
-  starting a second copy that can't get the capture card.
+**Fixes bad lighting with PS5 HDR.**
 
-Installs automatically when you close CaptureFix. New here? Read the
-[1.0.0 notes](https://github.com/NamiSwan222/capturefix/releases/tag/v1.0.0) for what CaptureFix does.
+- The HD60 X sends a PS5's HDR in *full* range, but CaptureFix assumed *limited* range. That crushed
+  every shadow to black and stretched the rest, so scenes looked too contrasty and the lighting was
+  off. CaptureFix now reads the signal and sets the range itself.
+- It also detects HDR vs SDR from the picture, so a wrong setting (or pressing H by mistake) can no
+  longer leave HDR looking dim and grey. Your old HDR on/off switch is replaced by
+  **Signal: auto-detect** (recommended), always HDR, or always SDR; same for the brightness range.
+  Press H to cycle the signal choices.
+- The stats overlay (F1) shows what was detected and the measured black and white levels.
+
+Tested against a real PS5 HDR frame plus HDR and SDR versions in both ranges: all four are detected
+correctly and render within about 1/255 of the intended picture.

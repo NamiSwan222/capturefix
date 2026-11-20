@@ -92,8 +92,12 @@ public sealed class SettingsForm : Form
     {
         var page = NewPage();
         Section(page, "HDR");
-        Check(page, "The console is sending HDR", "PS5 with HDR on sends HDR all the time, menus included. Wrong setting = washed out or harsh colors. Hotkey: H.",
-            () => P.HdrSignal, v => { P.HdrSignal = v; ApplyPicture(); });
+        Choice(page, "Signal", new[] { "Detect automatically (recommended)", "Always HDR10", "Always SDR" },
+            "CaptureFix reads the picture to tell HDR from SDR. Only force it if detection gets it wrong. Hotkey: H cycles the choices.",
+            () => P.HdrMode, v => { P.HdrMode = v; ApplyPicture(); });
+        Choice(page, "Brightness range", new[] { "Detect automatically (recommended)", "Limited (16-235)", "Full (0-255)" },
+            "The HD60 X sends a PS5's HDR in full range. Reading it as limited crushes shadows and makes everything too contrasty.",
+            () => P.RangeMode, v => { P.RangeMode = v; ApplyPicture(); });
         Choice(page, "HDR color style", new[] { "Natural (like a TV)", "Vivid (stronger colors)" },
             "Natural keeps gold, bronze and skin tones true. Vivid keeps more saturation, but very bright yellows drift toward orange.",
             () => P.ToneMap, v => { P.ToneMap = v; ApplyPicture(); });
@@ -112,8 +116,6 @@ public sealed class SettingsForm : Form
         Slider(page, "Sharpness", 0, 100, () => (int)Math.Round(P.Sharpness * 100), v => { P.Sharpness = v / 100f; ApplyPicture(); }, v => $"{v}%", "Crisper text and edges. Useful when the window is bigger than the video.");
         Choice(page, "Gamma", new[] { "2.2  (normal)", "2.4  (dark room)", "2.0  (bright room)" }, null,
             () => P.Gamma >= 2.3f ? 1 : P.Gamma <= 2.1f ? 2 : 0, v => { P.Gamma = v == 1 ? 2.4f : v == 2 ? 2.0f : 2.2f; ApplyPicture(); });
-        Check(page, "Full range (0-255)", "Only if blacks look grey or crushed with the console set to Full RGB range. Usually off.",
-            () => P.FullRange, v => { P.FullRange = v; ApplyPicture(); });
 
         Section(page, "HDR monitor");
         Check(page, "Show real HDR on an HDR monitor", "Needs HDR turned on in Windows display settings. Leave off while sharing on Discord: Discord streams SDR.",

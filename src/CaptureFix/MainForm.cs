@@ -90,6 +90,7 @@ public sealed class MainForm : Form
             _renderer = new Renderer(_video.Handle);
             _renderer.Resize(_video.ClientSize.Width, _video.ClientSize.Height);
             ApplyColor();
+            _renderer.SignalDetected += (h, f) => BeginInvoke(() => OnSignalDetected(h, f));
             _renderer.SnapshotSaved += (path, err) => BeginInvoke(() =>
             {
                 if (_autoSnapshot != null) { Close(); return; }
@@ -162,6 +163,7 @@ public sealed class MainForm : Form
             var cap = await Task.Run(() => VideoCapture.Start(dev, mode));
             cap.Failed += msg => BeginInvoke(() => { _status = msg; _retryAt = Environment.TickCount64 + 3000; });
             _capture = cap;
+            _renderer!.Signal.Reset(profile.LastHdr, profile.LastFullRange);
             _renderer!.Source = cap;
             _status = null;
             _retryAt = 0;
@@ -181,7 +183,7 @@ public sealed class MainForm : Form
         var m = _modes.FirstOrDefault(x => x.Key == p.ModeKey);
         if (m != null) return m;
         bool Hd60(VideoMode x) => x.Width == 1920 && x.Height == 1080 && Math.Round(x.Fps) == 60;
-        if (p.HdrSignal)
+        if (p.HdrMode == 1 || (p.HdrMode == 0 && p.LastHdr))
             m = _modes.FirstOrDefault(x => x.Format == PixelFormat.P010 && Hd60(x)) ?? _modes.FirstOrDefault(x => x.Format == PixelFormat.P010);
         m ??= _modes.FirstOrDefault(x => x.Format == PixelFormat.NV12 && Hd60(x))
               ?? _modes.FirstOrDefault(x => x.Format != PixelFormat.P010)
@@ -216,7 +218,7 @@ public sealed class MainForm : Form
         var p = _s.Active;
         _renderer.Color = new ColorSettings
         {
-            HdrSignal = p.HdrSignal, FullRange = p.FullRange, PeakNits = p.PeakNits, SdrPeakNits = p.SdrPeakNits,
+            HdrMode = p.HdrMode, RangeMode = p.RangeMode, PeakNits = p.PeakNits, SdrPeakNits = p.SdrPeakNits,
             Saturation = p.Saturation, HdrSdrWhite = _s.HdrSdrWhite, AllowHdrOutput = _s.AllowHdrOutput,
             ToneMap = p.ToneMap, Contrast = p.Contrast, BlackLevel = p.BlackLevel, Gamma = p.Gamma,
             Warmth = p.Warmth, Sharpness = p.Sharpness,
@@ -282,22 +284,39 @@ public sealed class MainForm : Form
     {
         var p = _s.Active;
         p.ModeKey = m.Key;
-        // The HD60 X passes an HDR signal through unchanged in every mode (8-bit ones too), so the
-        // mode says nothing about HDR. Only switch HDR on when picking a 10-bit mode.
-        if (m.Format == PixelFormat.P010) p.HdrSignal = true;
+        // The HD60 X passes HDR through unchanged in every mode (8-bit ones too), so the mode says
+        // nothing about HDR: the picture itself decides (auto-detect).
         _s.Save();
         ApplyColor();
         Changed();
         _ = StartCaptureAsync();
     }
 
+    /// <summary>H cycles: auto-detect, then forced HDR, then forced SDR.</summary>
     void ToggleHdr()
     {
         var p = _s.Active;
-        p.HdrSignal = !p.HdrSignal;
+        p.HdrMode = (p.HdrMode + 1) % 3;
         _s.Save();
         ApplyColor();
-        Toast(p.HdrSignal ? "Signal: HDR10 (decoding PQ / BT.2020)" : "Signal: SDR");
+        Toast(p.HdrMode switch
+        {
+            0 => $"Signal: detected automatically (now {(_renderer?.EffectiveHdr == true ? "HDR10" : "SDR")})",
+            1 => "Signal: always HDR10",
+            _ => "Signal: always SDR",
+        });
+        Changed();
+    }
+
+    /// <summary>Remembers what auto-detect saw, so the next start begins with the right guess.</summary>
+    void OnSignalDetected(bool hdr, bool full)
+    {
+        var p = _s.Active;
+        if (p.LastHdr == hdr && p.LastFullRange == full) return;
+        p.LastHdr = hdr; p.LastFullRange = full;
+        _s.Save();
+        if (p.HdrMode == 0 || p.RangeMode == 0)
+            Toast($"Detected: {(hdr ? "HDR10" : "SDR")}, {(full ? "full" : "limited")} range");
         Changed();
     }
 
@@ -457,8 +476,22 @@ public sealed class MainForm : Form
         if (_modes.Count == 0) modes.DropDownItems.Add(new ToolStripMenuItem("(no capture card)") { Enabled = false });
         _menu.Items.Add(modes);
 
-        _menu.Items.Add(new ToolStripMenuItem("HDR signal", null, (_, _) => ToggleHdr()) { Checked = p.HdrSignal, ShortcutKeyDisplayString = "H" });
-        _menu.Items.Add(new ToolStripMenuItem("Full range (0-255)", null, (_, _) => { p.FullRange = !p.FullRange; _s.Save(); ApplyColor(); }) { Checked = p.FullRange });
+        var sig = new ToolStripMenuItem("Signal (HDR or SDR)") { ShortcutKeyDisplayString = "H" };
+        string[] sigNames = { "Detect automatically", "Always HDR10", "Always SDR" };
+        for (int k = 0; k < 3; k++)
+        {
+            int kk = k;
+            sig.DropDownItems.Add(new ToolStripMenuItem(sigNames[k], null, (_, _) => { p.HdrMode = kk; _s.Save(); ApplyColor(); Changed(); }) { Checked = p.HdrMode == k });
+        }
+        _menu.Items.Add(sig);
+        var rng = new ToolStripMenuItem("Brightness range");
+        string[] rngNames = { "Detect automatically", "Limited (16-235)", "Full (0-255)" };
+        for (int k = 0; k < 3; k++)
+        {
+            int kk = k;
+            rng.DropDownItems.Add(new ToolStripMenuItem(rngNames[k], null, (_, _) => { p.RangeMode = kk; _s.Save(); ApplyColor(); Changed(); }) { Checked = p.RangeMode == k });
+        }
+        _menu.Items.Add(rng);
         _menu.Items.Add(new ToolStripMenuItem("Show real HDR on an HDR monitor", null, (_, _) =>
         {
             _s.AllowHdrOutput = !_s.AllowHdrOutput; _s.Save(); ApplyColor();
@@ -578,7 +611,8 @@ public sealed class MainForm : Form
             var p = _s.Active;
             lines.Add($"{p.Name}  ·  {cap.Mode}");
             lines.Add($"{_renderer.PresentFps:0.0} fps  ·  card to screen {_renderer.LatencyMs:0.0} ms (+ display)");
-            lines.Add($"Signal {(p.HdrSignal ? "HDR10" : "SDR")} {(p.FullRange ? "full" : "limited")} range  ·  output {(_renderer.OutputIsHdr ? "HDR (scRGB)" : "SDR")}{(_renderer.MonitorHdr ? ", monitor in HDR" : "")}");
+            string hdrSrc = p.HdrMode == 0 ? "auto" : "set", rngSrc = p.RangeMode == 0 ? "auto" : "set";
+            lines.Add($"Signal {(_renderer.EffectiveHdr ? "HDR10" : "SDR")} ({hdrSrc}), {(_renderer.EffectiveFullRange ? "full" : "limited")} range ({rngSrc}); black {_renderer.Signal.BlackCode}, white {_renderer.Signal.WhiteCode}  ·  output {(_renderer.OutputIsHdr ? "HDR (scRGB)" : "SDR")}{(_renderer.MonitorHdr ? ", monitor in HDR" : "")}");
             lines.Add($"Audio {_audio.InputName ?? "-"} → {_audio.OutputName ?? "-"}  ·  buffer {_audio.BufferedMs:0}/{_audio.DelayMs} ms  ·  speed {_audio.SpeedPercent:+0.00;-0.00}%  ·  gaps {_audio.Underruns} (cushion +{_audio.ExtraMs} ms)");
             if (_audio.FormatInfo != null) lines.Add("Audio " + _audio.FormatInfo + (_audio.LossPercent is double l ? $"  ·  lost on USB {l:0.0}%" : ""));
         }
