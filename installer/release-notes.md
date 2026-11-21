@@ -1,10 +1,8 @@
-## CaptureFix 1.0.3
+## CaptureFix 1.0.4
 
-**Fixes "no game audio".**
+- Brightness range detection also uses the white level now: limited range clips white at 940, full
+  range reaches 1023. Bright scenes with no black on screen (like the PS5 home and login screens)
+  no longer depend on a guess.
 
-- Windows had muted CaptureFix in the volume mixer (a mute there is remembered per app, so it
-  survived restarts and updates). CaptureFix now turns its own mixer entry back on when it starts;
-  it has its own mute (M) for when you want silence.
-- If something mutes it while it runs (the volume mixer, a mixer app or a Stream Deck key),
-  CaptureFix says so on screen and in Settings > Sound, and M turns the sound back on.
-- Opts out of Windows "ducking": joining a Discord call no longer turns the game audio down by 80%.
+Also in 1.0.3: game audio is no longer left muted by the Windows volume mixer, and Discord calls
+don't turn the game audio down.

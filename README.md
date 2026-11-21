@@ -39,7 +39,9 @@ settings, so CaptureFix reads them from the picture ([SignalAnalyzer.cs](src/Cap
   range puts black at 0-30. It is **not fixed**: two real PS5 HDR frames through the same HD60 X were
   full range (black at ~14, nothing at 64) in one game menu and limited range (nothing below 64) in
   another. Assuming the wrong one either crushes every shadow below code 64 and stretches the rest
-  (harsh contrast, bad lighting), or lifts blacks to grey. So it's measured, not assumed.
+  (harsh contrast, bad lighting), or lifts blacks to grey. So it's measured, not assumed: from the
+  black level, or when nothing on screen is black, from the white level (limited range clips white
+  at 940, full range reaches 1023).
 - **HDR or SDR.** SDR white text, lights and highlights reach the top of the range (940 / 1023). HDR10
   keeps normal content at 200-600 and never gets near 900 (over 5000 nits), so a few pixels up there
   prove SDR. Without that proof for 30 seconds, it's HDR.

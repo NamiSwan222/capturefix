@@ -92,8 +92,18 @@ public sealed class SignalAnalyzer
         if (!active) return;
 
         // --- range ---
-        bool wantFull = p2 < 44;
-        bool wantLimited = p2 is >= 56 and <= 80;
+        // Black level is the best clue. Without black on screen, the white level decides: limited
+        // range clips white at 940 (a pile-up there and nothing above 960), full range reaches 1023.
+        int clip940 = 0, above960 = 0, above1000 = 0;
+        for (int i = 936; i <= 944; i++) clip940 += hist[i];
+        for (int i = 960; i < 1024; i++) above960 += hist[i];
+        for (int i = 1000; i < 1024; i++) above1000 += hist[i];
+        int few = Math.Max(4, n / 2000);   // ~0.05% of pixels
+        bool blackFull = p2 < 44, blackLimited = p2 is >= 56 and <= 80;
+        bool whiteLimited = clip940 >= few && above960 <= n / 20000;
+        bool whiteFull = above1000 >= few;
+        bool wantFull = blackFull || (!blackLimited && whiteFull);
+        bool wantLimited = !wantFull && (blackLimited || whiteLimited);
         if (wantFull) { _fullVotes++; _limitedVotes = 0; }
         else if (wantLimited) { _limitedVotes++; _fullVotes = 0; }
         bool oldFull = FullRange, oldHdr = Hdr;
