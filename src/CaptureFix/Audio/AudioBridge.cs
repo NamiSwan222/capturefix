@@ -110,6 +110,7 @@ public sealed class AudioBridge : IDisposable
 
             _out = new WasapiOut(output, AudioClientShareMode.Shared, true, 30);
             _out.Init(_player);
+            ConfigureSession(output);
             _capture.StartRecording();
             _out.Play();
             Error = null;
@@ -121,12 +122,53 @@ public sealed class AudioBridge : IDisposable
         }
     }
 
+    SimpleAudioVolume? _sessionVolume;
+
+    /// <summary>True when something outside CaptureFix (the Windows volume mixer, a mixer app or a
+    /// Stream Deck key) has muted CaptureFix's sound. Windows remembers that per app.</summary>
+    public bool SessionMuted { get { try { return _sessionVolume?.Mute == true; } catch { return false; } } }
+
+    public void UnmuteSession() { try { if (_sessionVolume != null) _sessionVolume.Mute = false; } catch { } }
+
+    /// <summary>
+    /// Sets up CaptureFix's entry in the Windows volume mixer: clears a mute Windows remembered from
+    /// before (CaptureFix has its own mute, M), and opts out of "ducking", where Windows turns other
+    /// sounds down by 80% whenever it detects a call. Game audio shouldn't vanish because you joined a
+    /// Discord call.
+    /// </summary>
+    void ConfigureSession(MMDevice output)
+    {
+        _sessionVolume = null;
+        try
+        {
+            var mgr = output.AudioSessionManager;
+            mgr.RefreshSessions();
+            uint pid = (uint)Environment.ProcessId;
+            var sessions = mgr.Sessions;
+            for (int i = 0; i < sessions.Count; i++)
+            {
+                var sc = sessions[i];
+                if (sc.GetProcessID != pid) continue;
+                var f = typeof(AudioSessionControl).GetField("audioSessionControlInterface2",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                (f?.GetValue(sc) as NAudio.CoreAudioApi.Interfaces.IAudioSessionControl2)?.SetDuckingPreference(true);
+                if (!_muted && sc.SimpleAudioVolume.Mute) { sc.SimpleAudioVolume.Mute = false; UnmutedAtStart = true; }
+                _sessionVolume = sc.SimpleAudioVolume;
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>Set when start-up found CaptureFix muted in the Windows mixer and turned it back on.</summary>
+    public bool UnmutedAtStart { get; private set; }
+
     public void Stop()
     {
         try { _capture?.StopRecording(); } catch { }
         try { _out?.Stop(); } catch { }
         _capture?.Dispose(); _capture = null;
         _out?.Dispose(); _out = null;
+        _sessionVolume = null;
         _player?.Tap?.Dispose();
         _player = null;
     }

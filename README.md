@@ -75,6 +75,10 @@ What CaptureFix does about it:
 - Fades out and back in if the buffer ever runs dry, and adds a little cushion each time.
 - Shows the loss in Settings > Sound and the F1 stats, and warns once when it's over 1%.
 
+CaptureFix also clears a mute Windows remembered for it in the volume mixer when it starts (M is
+its own mute), warns if something mutes it while running, and opts out of Windows call "ducking",
+so a Discord call doesn't turn the game down by 80%.
+
 The real fix is the USB port: move the HD60 X to a port on another controller (a rear USB port
 connected to the CPU), so 0% is lost.
 

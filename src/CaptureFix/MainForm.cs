@@ -247,6 +247,7 @@ public sealed class MainForm : Form
         get
         {
             if (_audio.Error != null) return "Problem: " + _audio.Error;
+            if (!_s.Muted && _audio.SessionMuted) return "Muted in the Windows volume mixer (or by a mixer app / Stream Deck). Press M in CaptureFix to turn it back on.";
             if (_audio.InputName == null) return "Not running";
             var loss = _audio.LossPercent;
             if (loss == null) return "Measuring…";
@@ -322,6 +323,13 @@ public sealed class MainForm : Form
 
     void ToggleMute()
     {
+        // Muted from outside (volume mixer etc.): M turns the sound back on instead of muting more.
+        if (!_s.Muted && _audio.SessionMuted)
+        {
+            _audio.UnmuteSession();
+            Toast("Game audio on (it was muted in the Windows volume mixer)");
+            return;
+        }
         _s.Muted = !_s.Muted;
         _s.Save();
         ApplyAudioLevels();
@@ -605,6 +613,8 @@ public sealed class MainForm : Form
         var lines = new List<string>();
         if (problem != null) lines.Add(problem);
         if (_audio.Error != null) lines.Add(_audio.Error);
+        else if (!_s.Muted && _audio.SessionMuted)
+            lines.Add("No game audio: CaptureFix is muted in the Windows volume mixer. Press M to turn it back on.");
         if (_toast != null && now < _toastUntil) lines.Add(_toast);
         if (_s.ShowStats && cap != null && _renderer != null)
         {
