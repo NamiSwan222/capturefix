@@ -102,8 +102,24 @@ public sealed class SignalAnalyzer
         bool blackFull = p2 < 44, blackLimited = p2 is >= 56 and <= 80;
         bool whiteLimited = clip940 >= few && above960 <= n / 20000;
         bool whiteFull = above1000 >= few;
-        bool wantFull = blackFull || (!blackLimited && whiteFull);
-        bool wantLimited = !wantFull && (blackLimited || whiteLimited);
+
+        // The hard evidence: a limited-range signal cannot go below 64 or above 940 at all (a console
+        // clips there exactly, leaving a pile-up on the limit and nothing beyond), while a full-range
+        // picture with any shadows or highlights has plenty beyond. Measured on one PS5: gameplay at
+        // 16-235 exactly, and later a pause menu with 5-9% below 64 and 1% above 940. The range
+        // follows the console's output mode, so it has to be watched all the time.
+        int below = 0, above = 0, floorPile = 0, ceilPile = 0;
+        for (int i = 0; i < 60; i++) below += hist[i];
+        for (int i = 945; i < 1024; i++) above += hist[i];
+        for (int i = 64; i < 68; i++) floorPile += hist[i];
+        for (int i = 936; i < 944; i++) ceilPile += hist[i];
+        int trace = Math.Max(1, n / 20000), clear = Math.Max(8, n / 330), pile = Math.Max(4, n / 5000);
+        bool strongFull = below >= clear || above >= clear;
+        bool cleanEdges = below <= trace && above <= trace;
+        bool strongLimited = cleanEdges && (floorPile >= pile || ceilPile >= pile);
+
+        bool wantFull = strongFull || blackFull || (!blackLimited && whiteFull);
+        bool wantLimited = !wantFull && (strongLimited || (cleanEdges && (blackLimited || whiteLimited)));
         if (wantFull) { _fullVotes++; _limitedVotes = 0; }
         else if (wantLimited) { _limitedVotes++; _fullVotes = 0; }
         bool oldFull = FullRange, oldHdr = Hdr;

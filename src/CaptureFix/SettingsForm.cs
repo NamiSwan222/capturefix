@@ -113,7 +113,7 @@ public sealed class SettingsForm : Form
             "CaptureFix reads the picture to tell HDR from SDR. Only force it if detection gets it wrong. Hotkey: H cycles the choices.",
             () => P.HdrMode, v => { P.HdrMode = v; ApplyPicture(); });
         Choice(page, "Brightness range", new[] { "Detect automatically (recommended)", "Limited (16-235)", "Full (0-255)" },
-            "Black can sit at 0 (full) or 16 (limited). Reading it wrong crushes shadows or turns blacks grey.",
+            "Black can sit at 0 (full) or 16 (limited), and a console can switch between them. Reading it wrong crushes shadows or turns blacks grey, so leave this on automatic. Hotkey: R sets it back to automatic.",
             () => P.RangeMode, v => { P.RangeMode = v; ApplyPicture(); });
         Choice(page, "HDR color style", new[] { "Natural (like a TV)", "Vivid (stronger colors)" },
             "Natural keeps gold, bronze and skin tones true. Vivid keeps more saturation, but very bright yellows drift toward orange.",
@@ -280,6 +280,7 @@ public sealed class SettingsForm : Form
             ("1, 2, 3…", "Switch console"),
             ("G", "Frame generation: off, 2x, 3x, 4x"),
             ("H", "Signal: auto-detect, always HDR, always SDR"),
+            ("R", "Brightness range: back to automatic"),
             ("S", "Settings"),
             ("A", "Picture settings"),
             ("M", "Mute game audio"),

@@ -264,6 +264,18 @@ public sealed class MainForm : Form
         "Right now it shares a USB controller with about 10 of them, and HD video plus all that traffic overloads it.";
 
     bool _lossWarned;
+    long _rangeMismatchSince;
+
+    /// <summary>R: let the app follow the console's brightness range again.</summary>
+    void AutoRange()
+    {
+        var p = _s.Active;
+        p.RangeMode = 0;
+        _s.Save();
+        ApplyColor();
+        Toast($"Brightness range: detected automatically (now {(_renderer?.Signal.FullRange == true ? "full" : "limited")})");
+        Changed();
+    }
     public void Reconnect() => _ = StartCaptureAsync();
     public void SelectDevice(string link) { _s.DeviceLink = link; _s.AudioInputId = null; _s.Save(); _ = StartCaptureAsync(); }
     public void SetAlwaysOnTop(bool on) { _s.AlwaysOnTop = on; TopMost = on; _s.Save(); }
@@ -601,6 +613,7 @@ public sealed class MainForm : Form
             case Keys.Escape when FormBorderStyle == FormBorderStyle.None: ToggleFullscreen(); return true;
             case Keys.H: ToggleHdr(); return true;
             case Keys.G: CycleFrameGen(); return true;
+            case Keys.R: AutoRange(); return true;
             case Keys.M: ToggleMute(); return true;
             case Keys.A: OpenSettings(0); return true;
             case Keys.S: OpenSettings(); return true;
@@ -646,6 +659,22 @@ public sealed class MainForm : Form
         }
         if (problem == null && _renderer?.Error is { } re) problem = "Display: " + re;
 
+        // A forced brightness range that contradicts what the console sends crushes shadows or greys
+        // out blacks. Say so for a while each time it starts (the evidence is hard: see SignalAnalyzer).
+        string? rangeWarning = null;
+        if (_renderer != null && cap != null)
+        {
+            var prof = _s.Active; var sig = _renderer.Signal;
+            bool mismatch = prof.RangeMode != 0 && sig.RangeKnown && sig.FullRange != (prof.RangeMode == 2);
+            if (!mismatch) _rangeMismatchSince = 0;
+            else
+            {
+                if (_rangeMismatchSince == 0) _rangeMismatchSince = now;
+                if (now - _rangeMismatchSince < 30000)
+                    rangeWarning = $"Colors may look wrong: brightness range is set to {(prof.RangeMode == 2 ? "Full" : "Limited")}, but the console is sending {(sig.FullRange ? "full" : "limited")} range. Press R to follow it automatically.";
+            }
+        }
+
         if (!_lossWarned && _audio.LossPercent is double loss && loss >= 1.0)
         {
             _lossWarned = true;
@@ -658,6 +687,7 @@ public sealed class MainForm : Form
         if (_audio.Error != null) lines.Add(_audio.Error);
         else if (!_s.Muted && _audio.SessionMuted)
             lines.Add("No game audio: CaptureFix is muted in the Windows volume mixer. Press M to turn it back on.");
+        if (rangeWarning != null) lines.Add(rangeWarning);
         if (_toast != null && now < _toastUntil) lines.Add(_toast);
         if (_s.ShowStats && cap != null && _renderer != null)
         {

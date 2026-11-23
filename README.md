@@ -35,13 +35,14 @@ work itself in a GPU shader ([video.hlsl](src/CaptureFix/Shaders/video.hlsl)):
 Two things must be right or the lighting is wrong, and they differ between consoles, modes and
 settings, so CaptureFix reads them from the picture ([SignalAnalyzer.cs](src/CaptureFix/Video/SignalAnalyzer.cs)):
 
-- **Brightness range.** Limited-range video never goes below 64 (10-bit) and parks black at 64; full
-  range puts black at 0-30. It is **not fixed**: two real PS5 HDR frames through the same HD60 X were
-  full range (black at ~14, nothing at 64) in one game menu and limited range (nothing below 64) in
-  another. Assuming the wrong one either crushes every shadow below code 64 and stretches the rest
-  (harsh contrast, bad lighting), or lifts blacks to grey. So it's measured, not assumed: from the
-  black level, or when nothing on screen is black, from the white level (limited range clips white
-  at 940, full range reaches 1023).
+- **Brightness range.** Limited-range video never goes below 64 (10-bit) or above 940; full range
+  uses everything. It is **not fixed**: on the same PS5 and HD60 X, gameplay arrived at 16-235
+  exactly (8-bit) and, later, a pause menu had 5-9% of its pixels below the limited black level and
+  1% above its white level. Reading full as limited crushes shadows and clips whites; reading
+  limited as full turns blacks grey. The detector uses hard evidence: more than 0.3% of pixels
+  beyond the limited range means full; nothing beyond it plus a pile-up exactly on a limit (a
+  console clips there) means limited. A forced setting that contradicts the evidence shows an
+  on-screen warning, and R switches back to automatic.
 - **HDR or SDR.** SDR white text, lights and highlights reach the top of the range (940 / 1023). HDR10
   keeps normal content at 200-600 and never gets near 900 (over 5000 nits), so a few pixels up there
   prove SDR. Without that proof for 30 seconds, it's HDR.
@@ -167,6 +168,7 @@ a time.
 | 1 / 2 | PS5 / Switch 2 profile |
 | G | Frame generation: off, 2x, 3x, 4x |
 | H | Signal: auto-detect, always HDR, always SDR |
+| R | Brightness range back to automatic |
 | S | Settings (picture, sound, video, consoles, window, keys) |
 | A | Picture settings |
 | M | Mute game audio |
