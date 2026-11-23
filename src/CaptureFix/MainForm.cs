@@ -139,7 +139,7 @@ public sealed class MainForm : Form
         _updateTimer.Tick += (_, _) => { _updateTimer.Interval = 6 * 60 * 60 * 1000; _ = CheckUpdatesAsync(false); };
         _updateTimer.Start();
         if (_justUpdated) return;
-        if (_s.ShowTips) Toast("Right-click for options   ·   F11 full screen   ·   H HDR on/off");
+        if (_s.ShowTips) Toast("Right-click for options   ·   F11 full screen   ·   G frame generation");
     }
 
     // ---------- capture ----------
@@ -222,6 +222,7 @@ public sealed class MainForm : Form
             Saturation = p.Saturation, HdrSdrWhite = _s.HdrSdrWhite, AllowHdrOutput = _s.AllowHdrOutput,
             ToneMap = p.ToneMap, Contrast = p.Contrast, BlackLevel = p.BlackLevel, Gamma = p.Gamma,
             Warmth = p.Warmth, Sharpness = p.Sharpness,
+            FrameGen = p.FrameGen, FrameGenQuality = p.FrameGenQuality,
         };
         _renderer.Invalidate();
     }
@@ -291,6 +292,39 @@ public sealed class MainForm : Form
         ApplyColor();
         Changed();
         _ = StartCaptureAsync();
+    }
+
+    /// <summary>G cycles frame generation: off, 2x, 3x, 4x.</summary>
+    void CycleFrameGen()
+    {
+        var p = _s.Active;
+        SetFrameGen(p.FrameGen switch { < 2 => 2, 2 => 3, 3 => 4, _ => 0 });
+    }
+
+    public void SetFrameGen(int factor)
+    {
+        _s.Active.FrameGen = factor;
+        _s.Save();
+        ApplyColor();
+        Toast(factor < 2 ? "Frame generation off" : $"Frame generation {factor}x: a 30 fps game is shown at {30 * factor} fps");
+        Changed();
+    }
+
+    /// <summary>One line on what frame generation is doing right now.</summary>
+    public string FrameGenStatus
+    {
+        get
+        {
+            var r = _renderer;
+            int want = _s.Active.FrameGen;
+            if (r == null || want < 2) return "Off";
+            if (r.GameFps < 1) return "On. Waiting for the picture to move.";
+            if (r.FrameGenFactor >= 2)
+                return $"Game {r.GameFps:0} fps, shown at {r.PresentFps:0} fps ({r.FrameGenFactor}x). Adds {r.FrameGenDelayMs:0} ms of delay.";
+            return r.GameFps * 2 > r.RefreshHz * 1.03
+                ? $"On, idle: the game already runs at {r.GameFps:0} fps and this monitor shows {r.RefreshHz:0} Hz."
+                : $"On, idle: game at {r.GameFps:0} fps (uneven frame rate or scene change).";
+        }
     }
 
     /// <summary>H cycles: auto-detect, then forced HDR, then forced SDR.</summary>
@@ -492,6 +526,13 @@ public sealed class MainForm : Form
             sig.DropDownItems.Add(new ToolStripMenuItem(sigNames[k], null, (_, _) => { p.HdrMode = kk; _s.Save(); ApplyColor(); Changed(); }) { Checked = p.HdrMode == k });
         }
         _menu.Items.Add(sig);
+        var fg = new ToolStripMenuItem("Frame generation") { ShortcutKeyDisplayString = "G" };
+        foreach (var (name, factor) in new[] { ("Off", 0), ("2x  (30 fps game at 60)", 2), ("3x  (30 fps game at 90)", 3), ("4x  (30 fps game at 120)", 4) })
+        {
+            int ff = factor;
+            fg.DropDownItems.Add(new ToolStripMenuItem(name, null, (_, _) => SetFrameGen(ff)) { Checked = factor == 0 ? p.FrameGen < 2 : p.FrameGen == factor });
+        }
+        _menu.Items.Insert(2, fg);
         var rng = new ToolStripMenuItem("Brightness range");
         string[] rngNames = { "Detect automatically", "Limited (16-235)", "Full (0-255)" };
         for (int k = 0; k < 3; k++)
@@ -558,6 +599,7 @@ public sealed class MainForm : Form
             case Keys.Alt | Keys.Enter: ToggleFullscreen(); return true;
             case Keys.Escape when FormBorderStyle == FormBorderStyle.None: ToggleFullscreen(); return true;
             case Keys.H: ToggleHdr(); return true;
+            case Keys.G: CycleFrameGen(); return true;
             case Keys.M: ToggleMute(); return true;
             case Keys.A: OpenSettings(0); return true;
             case Keys.S: OpenSettings(); return true;
@@ -621,6 +663,7 @@ public sealed class MainForm : Form
             var p = _s.Active;
             lines.Add($"{p.Name}  ·  {cap.Mode}");
             lines.Add($"{_renderer.PresentFps:0.0} fps  ·  card to screen {_renderer.LatencyMs:0.0} ms (+ display)");
+            lines.Add("Frame generation: " + FrameGenStatus);
             string hdrSrc = p.HdrMode == 0 ? "auto" : "set", rngSrc = p.RangeMode == 0 ? "auto" : "set";
             lines.Add($"Signal {(_renderer.EffectiveHdr ? "HDR10" : "SDR")} ({hdrSrc}), {(_renderer.EffectiveFullRange ? "full" : "limited")} range ({rngSrc}); black {_renderer.Signal.BlackCode}, white {_renderer.Signal.WhiteCode}  ·  output {(_renderer.OutputIsHdr ? "HDR (scRGB)" : "SDR")}{(_renderer.MonitorHdr ? ", monitor in HDR" : "")}");
             lines.Add($"Audio {_audio.InputName ?? "-"} → {_audio.OutputName ?? "-"}  ·  buffer {_audio.BufferedMs:0}/{_audio.DelayMs} ms  ·  speed {_audio.SpeedPercent:+0.00;-0.00}%  ·  gaps {_audio.Underruns} (cushion +{_audio.ExtraMs} ms)");

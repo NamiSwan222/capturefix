@@ -8,6 +8,9 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--fgplay") { Dump.FrameGenPlay(args.Skip(1).ToArray()); return; }
+        if (args.Length > 0 && args[0] == "--fgtest") { Dump.FrameGenTest(args.Skip(1).ToArray()); return; }
+        if (args.Length > 0 && args[0] == "--cadence") { Dump.Cadence(args.Skip(1).ToArray()); return; }
         if (args.Length > 0 && args[0] == "--sessions") { Sessions.Run(args.Skip(1).ToArray()); return; }
         if (args.Length > 0 && args[0] == "--rendertest") { Dump.RenderTest(args.Skip(1).ToArray()); return; }
         if (args.Length > 0 && args[0] == "--analyze") { Dump.Analyze(args.Skip(1).ToArray()); return; }

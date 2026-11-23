@@ -91,12 +91,26 @@ public sealed class SettingsForm : Form
     FlowLayoutPanel BuildPicture()
     {
         var page = NewPage();
+        Section(page, "Smooth motion");
+        Choice(page, "Frame generation", new[] { "Off", "2x  (30 fps game shown at 60)", "3x  (30 fps game shown at 90)", "4x  (30 fps game shown at 120)" },
+            "Draws in-between pictures so a 30 fps game moves like a 60 fps one. Costs a little delay (about 17 ms at 2x for a 30 fps game) and can smear fast edges. Never goes above your monitor's refresh rate. Hotkey: G.",
+            () => P.FrameGen switch { < 2 => 0, 2 => 1, 3 => 2, _ => 3 }, v => _main.SetFrameGen(v == 0 ? 0 : v + 1));
+        Choice(page, "Motion quality", new[] { "Fast", "High (recommended with a gaming GPU)" }, null,
+            () => Math.Clamp(P.FrameGenQuality, 0, 1), v => { P.FrameGenQuality = v; ApplyPicture(); });
+        var fgStatus = new Label { AutoSize = true, ForeColor = Accent, MaximumSize = new Size(520, 0), Margin = new Padding(0, 2, 0, 4) };
+        page.Controls.Add(fgStatus);
+        var fgTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        fgTimer.Tick += (_, _) => { if (page.Visible) fgStatus.Text = _main.FrameGenStatus; };
+        fgTimer.Start();
+        Disposed += (_, _) => fgTimer.Dispose();
+        _loaders.Add(() => fgStatus.Text = _main.FrameGenStatus);
+
         Section(page, "HDR");
         Choice(page, "Signal", new[] { "Detect automatically (recommended)", "Always HDR10", "Always SDR" },
             "CaptureFix reads the picture to tell HDR from SDR. Only force it if detection gets it wrong. Hotkey: H cycles the choices.",
             () => P.HdrMode, v => { P.HdrMode = v; ApplyPicture(); });
         Choice(page, "Brightness range", new[] { "Detect automatically (recommended)", "Limited (16-235)", "Full (0-255)" },
-            "The HD60 X sends a PS5's HDR in full range. Reading it as limited crushes shadows and makes everything too contrasty.",
+            "Black can sit at 0 (full) or 16 (limited). Reading it wrong crushes shadows or turns blacks grey.",
             () => P.RangeMode, v => { P.RangeMode = v; ApplyPicture(); });
         Choice(page, "HDR color style", new[] { "Natural (like a TV)", "Vivid (stronger colors)" },
             "Natural keeps gold, bronze and skin tones true. Vivid keeps more saturation, but very bright yellows drift toward orange.",
@@ -261,7 +275,8 @@ public sealed class SettingsForm : Form
         {
             ("F11, Alt+Enter, double-click", "Full screen (Esc to leave)"),
             ("1, 2, 3…", "Switch console"),
-            ("H", "HDR signal on/off"),
+            ("G", "Frame generation: off, 2x, 3x, 4x"),
+            ("H", "Signal: auto-detect, always HDR, always SDR"),
             ("S", "Settings"),
             ("A", "Picture settings"),
             ("M", "Mute game audio"),

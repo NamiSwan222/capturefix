@@ -25,6 +25,8 @@ public sealed class ColorSettings
     public float Warmth;
     public float Sharpness;
     public bool AllowHdrOutput;     // show real HDR when the monitor is in HDR mode
+    public int FrameGen;            // 0/1 = off, 2-4 = pictures shown per game frame
+    public int FrameGenQuality = 1; // 0 = fast (quarter-size motion field), 1 = high (half-size)
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -55,6 +57,7 @@ public sealed class Renderer : IDisposable
     readonly ID3D11PixelShader _ps;
     readonly ID3D11SamplerState _sampler;
     readonly ID3D11Buffer _cbuffer;
+    readonly FrameGen _fg;
 
     ID3D11Texture2D? _texY, _texUV;
     ID3D11ShaderResourceView? _srvY, _srvUV;
@@ -90,7 +93,7 @@ public sealed class Renderer : IDisposable
     public Renderer(IntPtr hwnd)
     {
         _hwnd = hwnd;
-        Signal.Changed += (h, f) => SignalDetected?.Invoke(h, f);
+        Signal.Changed += (h, f) => { _dirty = true; SignalDetected?.Invoke(h, f); };
         var levels = new[] { FeatureLevel.Level_11_1, FeatureLevel.Level_11_0 };
         D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport, levels,
             out _device, out _ctx).CheckError();
@@ -108,6 +111,7 @@ public sealed class Renderer : IDisposable
 
         _sampler = _device.CreateSamplerState(new SamplerDescription(Filter.MinMagMipLinear, TextureAddressMode.Clamp));
         _cbuffer = _device.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<ShaderParams>(), BindFlags.ConstantBuffer));
+        _fg = new FrameGen(_device, _ctx, _sampler);
     }
 
     public void Start()
@@ -133,54 +137,178 @@ public sealed class Renderer : IDisposable
 
     readonly AutoResetEvent _wake = new(false);
 
+    // ---------- frame generation pacing ----------
+
+    long _fgChangeIndex = -1;                                    // picture currently stored as "newest"
+    readonly List<(long due, float alpha)> _pending = new();     // pictures still to show for this game frame
+    bool _fgShowing;                                             // the screen currently shows frame-generation output
+    double _refreshHz = 60;
+
+    /// <summary>How many pictures are shown per game frame right now (1 = frame generation idle).</summary>
+    public int FrameGenFactor { get; private set; } = 1;
+    /// <summary>The game's own frame rate, measured from repeated frames.</summary>
+    public double GameFps { get; private set; }
+    /// <summary>Extra delay frame generation adds to real frames, in ms.</summary>
+    public double FrameGenDelayMs { get; private set; }
+    public double RefreshHz => _refreshHz;
+
+    [DllImport("winmm.dll")] static extern uint timeBeginPeriod(uint ms);
+    [DllImport("winmm.dll")] static extern uint timeEndPeriod(uint ms);
+
     void Loop()
+    {
+        timeBeginPeriod(1);   // 1 ms waits; the default 15.6 ms tick is too coarse to pace 120 pictures a second
+        try { LoopCore(); }
+        finally { timeEndPeriod(1); }
+    }
+
+    void LoopCore()
     {
         long fpsStart = Stopwatch.GetTimestamp(); int fpsCount = 0;
         double latencyAcc = 0; int latencyCount = 0;
+        long gameFrames = 0;
+        var handles = new WaitHandle[2];
         while (!_stop)
         {
             var src = Source;
-            if (src != null) WaitHandle.WaitAny(new WaitHandle[] { src.FrameReady, _wake }, 100);
-            else _wake.WaitOne(100);
+            // Sleep until a frame arrives, something changes, or the next picture is due.
+            int timeout = 100;
+            if (_pending.Count > 0)
+            {
+                double ms = (_pending[0].due - Stopwatch.GetTimestamp()) * 1000.0 / Stopwatch.Frequency;
+                timeout = ms <= 1.5 ? 0 : (int)(ms - 1.5);
+            }
+            if (timeout > 0)
+            {
+                if (src != null) { handles[0] = src.FrameReady; handles[1] = _wake; WaitHandle.WaitAny(handles, timeout); }
+                else _wake.WaitOne(timeout);
+            }
             if (_stop) break;
 
             try
             {
-                if (_clear) { _clear = false; _haveFrame = false; _dirty = true; }
+                if (_clear) { _clear = false; _haveFrame = false; _dirty = true; ResetFrameGen(); }
                 UpdateOutputMode();
                 if (_resize) { ResizeSwapChain(); _resize = false; _dirty = true; }
 
                 var frame = src?.TakeLatest();
+                bool drew = false;
                 if (frame != null)
                 {
-                    Upload(frame);
                     Signal.Analyze(frame);
-                    long arrived = frame.ArrivedTicks;
+                    int want = Color.FrameGen;
+                    if (want < 2)
+                    {
+                        if (_fgShowing) ResetFrameGen();
+                        Upload(frame);
+                        Draw();
+                        drew = true;
+                        latencyAcc += (Stopwatch.GetTimestamp() - frame.ArrivedTicks) * 1000.0 / Stopwatch.Frequency;
+                        latencyCount++; fpsCount++;
+                        if (frame.ChangeIndex != _fgChangeIndex) { _fgChangeIndex = frame.ChangeIndex; gameFrames++; }
+                    }
+                    else if (frame.ChangeIndex != _fgChangeIndex || !_haveFrame)
+                    {
+                        // A new game frame (repeats are skipped: the screen already shows them).
+                        long gap = frame.ChangeIndex - _fgChangeIndex;
+                        _fgChangeIndex = frame.ChangeIndex;
+                        gameFrames++;
+                        Upload(frame);
+                        _fg.FinestLevel = Color.FrameGenQuality >= 1 ? 0 : 1;
+                        PushToFrameGen();
+                        _fgShowing = true;
+                        _fgArrived = frame.ArrivedTicks;
+
+                        double captureFps = Math.Max(1, src!.Mode.Fps);
+                        int m = Math.Min(want, 4);
+                        // Never more pictures than the monitor can show.
+                        while (m > 1 && gap > 0 && captureFps / gap * m > _refreshHz * 1.03) m--;
+                        bool cut = frame.ChangeDiffMean > 45;   // most of the picture changed: a scene cut
+                        _pending.Clear();
+                        long now = Stopwatch.GetTimestamp();
+                        if (m >= 2 && gap >= 1 && gap <= 4 && _fg.HasPair && !cut)
+                        {
+                            // The game frame lasts `period`; spread m pictures evenly across it,
+                            // generated ones first, the real frame last.
+                            double period = gap / captureFps * Stopwatch.Frequency;
+                            for (int i = 1; i <= m; i++)
+                                _pending.Add((now + (long)(period * (i - 1) / m), i == m ? 1f : (float)i / m));
+                            FrameGenFactor = m;
+                            FrameGenDelayMs = gap / captureFps * 1000.0 * (m - 1) / m;
+                        }
+                        else
+                        {
+                            _pending.Add((now, 1f));
+                            FrameGenFactor = 1; FrameGenDelayMs = 0;
+                        }
+                    }
                     src!.Return(frame);
-                    Draw();
-                    latencyAcc += (Stopwatch.GetTimestamp() - arrived) * 1000.0 / Stopwatch.Frequency;
-                    latencyCount++; fpsCount++;
                 }
-                else if (_dirty) Draw();
+                // Settings changed (or the signal was re-detected) while the picture stands still:
+                // redraw the newest frame with them. Moving pictures pick them up on the next frame.
+                if (_dirty && !drew && _pending.Count == 0) Draw();
                 _dirty = false;
 
-                long now = Stopwatch.GetTimestamp();
-                double secs = (now - fpsStart) / (double)Stopwatch.Frequency;
+                // Show whatever is due. If we fell behind, skip straight to the latest due picture.
+                long t = Stopwatch.GetTimestamp();
+                while (_pending.Count > 0 && _pending[0].due - t <= Stopwatch.Frequency / 2000)
+                {
+                    var (_, alpha) = _pending[0];
+                    _pending.RemoveAt(0);
+                    if (_pending.Count > 0 && _pending[0].due <= t) continue;
+                    PresentGenerated(alpha);
+                    fpsCount++;
+                    if (alpha >= 1f) { latencyAcc += (Stopwatch.GetTimestamp() - _fgArrived) * 1000.0 / Stopwatch.Frequency; latencyCount++; }
+                    t = Stopwatch.GetTimestamp();
+                }
+
+                long nowTicks = Stopwatch.GetTimestamp();
+                double secs = (nowTicks - fpsStart) / (double)Stopwatch.Frequency;
                 if (secs >= 1)
                 {
                     PresentFps = fpsCount / secs;
+                    GameFps = gameFrames / secs;
                     LatencyMs = latencyCount > 0 ? latencyAcc / latencyCount : 0;
-                    fpsStart = now; fpsCount = 0; latencyAcc = 0; latencyCount = 0;
+                    fpsStart = nowTicks; fpsCount = 0; latencyAcc = 0; latencyCount = 0; gameFrames = 0;
+                    if (Color.FrameGen < 2) { FrameGenFactor = 1; FrameGenDelayMs = 0; }
                 }
                 Error = null;
             }
             catch (Exception ex)
             {
                 Error = ex.Message;
+                _pending.Clear();
                 Thread.Sleep(250);
                 _resize = true;
             }
         }
+    }
+
+    long _fgArrived;
+
+    /// <summary>Testing: when set, every picture shown is logged as (time, alpha); alpha 1 = real frame, -1 = direct.</summary>
+    public List<(long ticks, float alpha)>? PresentLog;
+
+    void ResetFrameGen()
+    {
+        _pending.Clear();
+        _fg.Reset();
+        _fgShowing = false;
+        _fgChangeIndex = -1;
+        FrameGenFactor = 1; FrameGenDelayMs = 0;
+    }
+
+    /// <summary>Shows the newest real frame (alpha 1) or the generated picture at alpha.</summary>
+    void PresentGenerated(float alpha)
+    {
+        if (_swap == null || _rtv == null) return;
+        BeginPresent();
+        var vp = Letterbox();
+        if (alpha >= 1f) _fg.DrawNewest(_rtv, vp);
+        else _fg.DrawInterpolated(_rtv, vp, alpha);
+        _presentAlpha = alpha;
+        EndPresent();
+        _presentAlpha = -1;
     }
 
     bool WantHdrSwap() => Color.AllowHdrOutput && _monitorHdr;
@@ -200,6 +328,7 @@ public sealed class Renderer : IDisposable
             }
             catch { }
             _monitorHdr = hdr;
+            _refreshHz = Displays.RefreshHz(_hwnd);
         }
         if (_swap == null || WantHdrSwap() != _hdrSwap) { _resize = true; }
     }
@@ -306,49 +435,123 @@ public sealed class Renderer : IDisposable
         _haveFrame = true;
     }
 
-    void Draw()
+    Viewport Letterbox()
     {
-        if (_swap == null || _rtv == null) return;
-        _ctx.OMSetRenderTargets(_rtv);
-        _ctx.ClearRenderTargetView(_rtv, new Color4(0, 0, 0, 1));
+        // Keep the console's aspect ratio.
+        float scale = Math.Min((float)_width / _texW, (float)_height / _texH);
+        float w = _texW * scale, h = _texH * scale;
+        return new Viewport((_width - w) / 2, (_height - h) / 2, w, h);
+    }
 
-        if (_haveFrame && _srvY != null)
+    /// <summary>Converts the uploaded frame (colour, HDR, picture settings) into the given target.</summary>
+    void DrawSource(ID3D11RenderTargetView rtv, Viewport vp)
+    {
+        _ctx.OMSetRenderTargets(rtv);
+        _ctx.RSSetViewport(vp);
+        var c = Color;
+        var p = new ShaderParams
         {
-            // Letterbox: keep the console's aspect ratio.
-            float scale = Math.Min((float)_width / _texW, (float)_height / _texH);
-            float w = _texW * scale, h = _texH * scale;
-            _ctx.RSSetViewport(new Viewport((_width - w) / 2, (_height - h) / 2, w, h));
+            Format = _texFormat == PixelFormat.YUY2 ? 1 : 0,
+            HdrIn = EffectiveHdr ? 1 : 0,
+            HdrOut = _hdrSwap ? 1 : 0,
+            FullRange = EffectiveFullRange ? 1 : 0,
+            PeakIn = c.PeakNits, SdrPeak = c.SdrPeakNits, HdrSdrWhite = c.HdrSdrWhite,
+            TenBit = _texFormat == PixelFormat.P010 ? 1 : 0,
+            TexW = _texW, TexH = _texH, Saturation = c.Saturation,
+            ToneMap = c.ToneMap, Contrast = c.Contrast, BlackLevel = c.BlackLevel, Gamma = c.Gamma,
+            Warmth = c.Warmth, Sharpness = _texFormat == PixelFormat.YUY2 ? 0 : c.Sharpness,
+        };
+        _ctx.UpdateSubresource(in p, _cbuffer);
 
-            var c = Color;
-            var p = new ShaderParams
-            {
-                Format = _texFormat == PixelFormat.YUY2 ? 1 : 0,
-                HdrIn = EffectiveHdr ? 1 : 0,
-                HdrOut = _hdrSwap ? 1 : 0,
-                FullRange = EffectiveFullRange ? 1 : 0,
-                PeakIn = c.PeakNits, SdrPeak = c.SdrPeakNits, HdrSdrWhite = c.HdrSdrWhite,
-                TenBit = _texFormat == PixelFormat.P010 ? 1 : 0,
-                TexW = _texW, TexH = _texH, Saturation = c.Saturation,
-                ToneMap = c.ToneMap, Contrast = c.Contrast, BlackLevel = c.BlackLevel, Gamma = c.Gamma,
-                Warmth = c.Warmth, Sharpness = _texFormat == PixelFormat.YUY2 ? 0 : c.Sharpness,
-            };
-            _ctx.UpdateSubresource(in p, _cbuffer);
+        _ctx.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+        _ctx.VSSetShader(_vs);
+        _ctx.PSSetShader(_ps);
+        _ctx.PSSetShaderResources(0, new[] { _srvY!, _srvUV ?? _srvY! });
+        _ctx.PSSetSampler(0, _sampler);
+        _ctx.PSSetConstantBuffer(0, _cbuffer);
+        _ctx.Draw(3, 0);
+    }
 
-            _ctx.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-            _ctx.VSSetShader(_vs);
-            _ctx.PSSetShader(_ps);
-            _ctx.PSSetShaderResources(0, new[] { _srvY, _srvUV ?? _srvY });
-            _ctx.PSSetSampler(0, _sampler);
-            _ctx.PSSetConstantBuffer(0, _cbuffer);
-            _ctx.Draw(3, 0);
-        }
+    Format SwapFormat => _hdrSwap ? Format.R16G16B16A16_Float : Format.B8G8R8A8_UNorm;
+
+    /// <summary>Converts the uploaded frame and stores it as the newest frame for frame generation.</summary>
+    void PushToFrameGen()
+    {
+        _fg.HdrOut = _hdrSwap;
+        var rtv = _fg.BeginFrame(_texW, _texH, SwapFormat);
+        DrawSource(rtv, new Viewport(0, 0, _texW, _texH));
+        _fg.EndFrame();
+    }
+
+    void BeginPresent()
+    {
+        _ctx.OMSetRenderTargets(_rtv!);
+        _ctx.ClearRenderTargetView(_rtv!, new Color4(0, 0, 0, 1));
+    }
+
+    void EndPresent()
+    {
         var snap = Interlocked.Exchange(ref _snapshotPath, null);
         if (snap != null)
         {
             try { SaveBackBuffer(snap); SnapshotSaved?.Invoke(snap, null); }
             catch (Exception ex) { SnapshotSaved?.Invoke(snap, ex.Message); }
         }
-        _swap.Present(0, PresentFlags.None);
+        _swap!.Present(0, PresentFlags.None);
+        PresentLog?.Add((Stopwatch.GetTimestamp(), _presentAlpha));
+    }
+    float _presentAlpha = -1;
+
+    /// <summary>Shows the uploaded frame directly (no frame generation).</summary>
+    void Draw()
+    {
+        if (_swap == null || _rtv == null) return;
+        BeginPresent();
+        if (_haveFrame && _srvY != null) DrawSource(_rtv, Letterbox());
+        EndPresent();
+    }
+
+    /// <summary>Testing: makes the picture between frames a and c and compares it with the real middle frame b.</summary>
+    public string FrameGenTest(VideoFrame a, VideoFrame b, VideoFrame c, string outPrefix, int finestLevel, float smooth, float staticBias)
+    {
+        for (int i = 0; i < 150; i++) Signal.Analyze(b, force: true);
+        UpdateOutputMode();
+        ResizeSwapChain(); _resize = false;
+        _fg.FinestLevel = finestLevel; _fg.Smooth = smooth; _fg.StaticBias = staticBias;
+        _fg.Reset();
+        Upload(b); PushToFrameGen(); byte[] truth = _fg.ReadNewest();
+        _fg.Reset();
+        Upload(a); PushToFrameGen(); byte[] fa = _fg.ReadNewest();
+        Upload(c); PushToFrameGen(); byte[] fc = _fg.ReadNewest();
+        byte[] gen = _fg.ReadInterpolated(0.5f);
+        double ms = _fg.Benchmark();
+
+        static double Psnr(byte[] x, byte[] y)
+        {
+            double se = 0; long n = 0;
+            for (int i = 0; i < x.Length; i++) { if ((i & 3) == 3) continue; double d = x[i] - y[i]; se += d * d; n++; }
+            return se == 0 ? 99 : 10 * Math.Log10(255.0 * 255.0 / (se / n));
+        }
+        var blend = new byte[fa.Length];
+        for (int i = 0; i < blend.Length; i++) blend[i] = (byte)((fa[i] + fc[i] + 1) >> 1);
+
+        if (outPrefix.Length > 0)
+        {
+            SavePng(outPrefix + "_generated.png", gen); SavePng(outPrefix + "_truth.png", truth); SavePng(outPrefix + "_blend.png", blend);
+            var err = new byte[gen.Length];
+            for (int i = 0; i < err.Length; i++) err[i] = (i & 3) == 3 ? (byte)255 : (byte)Math.Min(255, Math.Abs(gen[i] - truth[i]) * 4);
+            SavePng(outPrefix + "_error_x4.png", err);
+        }
+        return $"generated {Psnr(gen, truth):0.00} dB | plain blend {Psnr(blend, truth):0.00} dB | repeat frame {Psnr(fa, truth):0.00} dB | {ms:0.00} ms per generated frame";
+    }
+
+    void SavePng(string path, byte[] bgra)
+    {
+        using var bmp = new System.Drawing.Bitmap(_texW, _texH, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
+        var bd = bmp.LockBits(new System.Drawing.Rectangle(0, 0, _texW, _texH), System.Drawing.Imaging.ImageLockMode.WriteOnly, bmp.PixelFormat);
+        for (int y = 0; y < _texH; y++) Marshal.Copy(bgra, y * _texW * 4, bd.Scan0 + y * bd.Stride, _texW * 4);
+        bmp.UnlockBits(bd);
+        bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
     }
 
     /// <summary>Testing: draws one frame without the render thread and saves exactly what would be shown.</summary>
@@ -416,6 +619,7 @@ public sealed class Renderer : IDisposable
         _stop = true;
         _wake.Set();
         _thread?.Join(1000);
+        _fg.Dispose();
         _srvY?.Dispose(); _srvUV?.Dispose(); _texY?.Dispose(); _texUV?.Dispose();
         _rtv?.Dispose(); _swap?.Dispose();
         _cbuffer.Dispose(); _sampler.Dispose(); _ps.Dispose(); _vs.Dispose();

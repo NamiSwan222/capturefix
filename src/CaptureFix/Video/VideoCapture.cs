@@ -30,6 +30,14 @@ public sealed class VideoFrame
     public int Width, Height;
     public PixelFormat Format;
     public long ArrivedTicks;   // Stopwatch ticks when the frame left the card's driver
+
+    // Cadence: a 30 fps game arrives as 60 frames a second with each picture sent twice.
+    public long Index;          // counts every frame the card delivered
+    public long ChangeIndex;    // Index of the newest frame whose picture differed from the one before
+    public float DiffAny;       // share of sampled pixels that changed at all since the previous frame
+    public float DiffBig;       // share that changed by more than 2/255
+    public float DiffMean;      // mean absolute change, in 8-bit codes
+    public float ChangeDiffMean; // DiffMean of the frame at ChangeIndex (large = scene cut)
 }
 
 /// <summary>
@@ -264,12 +272,80 @@ public sealed class VideoCapture : IDisposable
         Marshal.Copy(ptr, f.Data, 0, len);
         f.Length = len; f.Pitch = pitch; f.Width = Mode.Width; f.Height = h; f.Format = Mode.Format;
         f.ArrivedTicks = now;
+        Compare(f);
 
         var old = Interlocked.Exchange(ref _latest, f);
         if (old != null) _free.Add(old);  // renderer never saw it: drop, don't queue
         Interlocked.Increment(ref FramesCaptured);
         LastFrameTicks = now;
         FrameReady.Set();
+    }
+
+    // Luma of every 4th pixel on every 4th row of the previous frame.
+    byte[] _sig = Array.Empty<byte>(), _sigPrev = Array.Empty<byte>();
+    long _index, _changeIndex;
+    float _changeDiffMean;
+
+    /// <summary>A repeat is a frame where under 0.05% of sampled pixels moved by more than 2/255.</summary>
+    public const float RepeatThreshold = 0.0005f;
+
+    unsafe void Compare(VideoFrame f)
+    {
+        int sw = f.Width / 4, sh = f.Height / 4, n = sw * sh;
+        if (_sig.Length != n) { _sig = new byte[n]; _sigPrev = new byte[n]; _index = 0; _changeIndex = 0; }
+        int stride = f.Format == PixelFormat.NV12 ? 4 : 8;      // bytes between sampled pixels
+        int first = f.Format == PixelFormat.P010 ? 1 : 0;       // P010: take the high byte
+        int any = 0, big = 0; long sum = 0;
+        fixed (byte* data = f.Data, sig = _sig, prev = _sigPrev)
+        {
+            for (int y = 0; y < sh; y++)
+            {
+                byte* src = data + (long)(y * 4 + 2) * f.Pitch + first;
+                byte* d = sig + y * sw, pv = prev + y * sw;
+                for (int x = 0; x < sw; x++)
+                {
+                    byte v = src[x * stride];
+                    int diff = v - pv[x]; if (diff < 0) diff = -diff;
+                    if (diff != 0) { any++; sum += diff; if (diff > 2) big++; }
+                    d[x] = v;
+                }
+            }
+        }
+        (_sig, _sigPrev) = (_sigPrev, _sig);
+        f.Index = ++_index;
+        f.DiffAny = (float)any / n; f.DiffBig = (float)big / n; f.DiffMean = (float)sum / n;
+        if (f.DiffBig > RepeatThreshold || _index == 1) { _changeIndex = _index; _changeDiffMean = f.DiffMean; }
+        f.ChangeIndex = _changeIndex;
+        f.ChangeDiffMean = _changeDiffMean;
+    }
+
+    /// <summary>Testing: a capture that plays saved frames like a console would send them, each one
+    /// <paramref name="repeat"/> times (2 = a 30 fps game in a 60 Hz signal), back and forth.</summary>
+    public static VideoCapture StartSynthetic(VideoMode mode, IReadOnlyList<byte[]> frames, int repeat)
+    {
+        var cap = new VideoCapture(new CaptureDeviceInfo("Synthetic", ""), mode) { StartedTicks = Stopwatch.GetTimestamp() };
+        cap._thread = new Thread(() => cap.SyntheticLoop(frames, repeat)) { IsBackground = true, Name = "Synthetic capture" };
+        cap._thread.Start();
+        return cap;
+    }
+
+    unsafe void SyntheticLoop(IReadOnlyList<byte[]> frames, int repeat)
+    {
+        long period = (long)(Stopwatch.Frequency / Mode.Fps), next = Stopwatch.GetTimestamp();
+        int i = 0, dir = 1, shown = 0;
+        while (!_stop)
+        {
+            long wait = next - Stopwatch.GetTimestamp();
+            if (wait > Stopwatch.Frequency / 500) Thread.Sleep((int)(wait * 1000 / Stopwatch.Frequency) - 1);
+            while (Stopwatch.GetTimestamp() < next) Thread.SpinWait(20);
+            fixed (byte* p = frames[i]) Publish((IntPtr)p, frames[i].Length, Stopwatch.GetTimestamp());
+            if (++shown >= repeat && frames.Count > 1)
+            {
+                shown = 0; i += dir;
+                if (i == frames.Count - 1 || i == 0) dir = -dir;
+            }
+            next += period;
+        }
     }
 
     /// <summary>Takes the newest frame (or null). Hand it back with <see cref="Return"/>.</summary>

@@ -5,6 +5,103 @@ namespace CaptureFix;
 /// <summary>"CaptureFix.exe --dump out.raw [mode-key]": saves one untouched frame from the card (for colour analysis).</summary>
 static class Dump
 {
+    /// <summary>"--fgplay out.txt framesDir prefix count seconds factor repeat [snapshot.png]": plays saved NV12 frames
+    /// through the live renderer the way a console sends them and reports how evenly pictures were shown.</summary>
+    public static void FrameGenPlay(string[] a)
+    {
+        var frames = Enumerable.Range(0, int.Parse(a[3])).Select(i => File.ReadAllBytes(Path.Combine(a[1], $"{a[2]}{i}.raw"))).ToList();
+        double seconds = double.Parse(a[4], System.Globalization.CultureInfo.InvariantCulture);
+        int factor = int.Parse(a[5]), repeat = int.Parse(a[6]);
+        ApplicationConfiguration.Initialize();
+        using var form = new Form { ClientSize = new Size(1280, 720), ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(100, 100), Text = "CaptureFix frame generation test" };
+        var sb = new System.Text.StringBuilder();
+        form.Shown += async (_, _) =>
+        {
+            using var r = new Renderer(form.Handle);
+            r.Resize(form.ClientSize.Width, form.ClientSize.Height);
+            r.Color = new ColorSettings { FrameGen = factor, HdrMode = 2, RangeMode = 1 };
+            using var cap = VideoCapture.StartSynthetic(new VideoMode(PixelFormat.NV12, 1920, 1080, 60, 1), frames, repeat);
+            r.Source = cap;
+            r.Start();
+            await Task.Delay(1500);
+            r.PresentLog = new();
+            if (a.Length > 7) { await Task.Delay(700); r.RequestSnapshot(a[7]); }
+            await Task.Delay((int)(seconds * 1000));
+            var log = r.PresentLog.ToArray(); r.PresentLog = null;
+            double f = System.Diagnostics.Stopwatch.Frequency;
+            var gaps = log.Zip(log.Skip(1), (x, y) => (y.ticks - x.ticks) * 1000.0 / f).DefaultIfEmpty(0).ToArray();
+            double mean = gaps.Average(), sd = Math.Sqrt(gaps.Select(g => (g - mean) * (g - mean)).Average());
+            sb.AppendLine($"monitor {r.RefreshHz:0} Hz | game {r.GameFps:0.0} fps -> shown {r.PresentFps:0.0} fps | factor {r.FrameGenFactor}x | added delay {r.FrameGenDelayMs:0.0} ms | arrival-to-screen of real frames {r.LatencyMs:0.0} ms");
+            sb.AppendLine($"pictures {log.Length}: generated {log.Count(x => x.alpha is > 0 and < 1)}, real {log.Count(x => x.alpha >= 1)}, direct {log.Count(x => x.alpha < 0)}");
+            sb.AppendLine($"time between pictures: mean {mean:0.00} ms, std {sd:0.00} ms, min {gaps.Min():0.00}, max {gaps.Max():0.00}; over 1.5x mean: {gaps.Count(g => g > mean * 1.5)}");
+            sb.AppendLine("first pictures (alpha): " + string.Join(" ", log.Take(16).Select(x => x.alpha.ToString("0.##"))));
+            if (r.Error != null) sb.AppendLine("renderer error: " + r.Error);
+            r.Source = null;
+            File.WriteAllText(a[0], sb.ToString());
+            form.Close();
+        };
+        Application.Run(form);
+    }
+
+    /// <summary>"--fgtest out.txt A.raw B.raw C.raw FORMAT W H PITCH [pngPrefix] [finestLevel] [smooth] [staticBias]":
+    /// generates the frame between A and C on the GPU and compares it with the real middle frame B.</summary>
+    public static void FrameGenTest(string[] a)
+    {
+        VideoFrame Load(string path)
+        {
+            var f = new VideoFrame { Data = File.ReadAllBytes(path), Format = Enum.Parse<PixelFormat>(a[4]), Width = int.Parse(a[5]), Height = int.Parse(a[6]), Pitch = int.Parse(a[7]) };
+            f.Length = f.Data.Length; return f;
+        }
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        ApplicationConfiguration.Initialize();
+        using var form = new Form { ClientSize = new Size(960, 540), ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-4000, -4000) };
+        _ = form.Handle;
+        using var r = new Renderer(form.Handle);
+        r.Resize(960, 540);
+        r.Color = new ColorSettings();
+        string result;
+        try
+        {
+            result = r.FrameGenTest(Load(a[1]), Load(a[2]), Load(a[3]), a.Length > 8 ? a[8] : "",
+                a.Length > 9 ? int.Parse(a[9]) : 1, a.Length > 10 ? float.Parse(a[10], inv) : 0.012f, a.Length > 11 ? float.Parse(a[11], inv) : 0.05f);
+        }
+        catch (Exception ex) { result = "FAILED: " + ex; }
+        File.WriteAllText(a[0], result);
+    }
+
+    /// <summary>"--cadence out.txt seconds [mode-key] [saveDir saveCount]": logs every frame's arrival time and how much it
+    /// changed, to see the game's real frame rate. Optionally saves the first frames that follow a change.</summary>
+    public static void Cadence(string[] a)
+    {
+        var dev = VideoCapture.FindCaptureCard(null) ?? throw new InvalidOperationException("no device");
+        var modes = VideoCapture.ListModes(dev);
+        var mode = modes.FirstOrDefault(m => a.Length > 2 && m.Key == a[2]) ?? modes.First(m => m.Format == PixelFormat.P010 && m.Width == 1920 && Math.Round(m.Fps) == 60);
+        string? saveDir = a.Length > 3 ? a[3] : null; int saveCount = a.Length > 4 ? int.Parse(a[4]) : 0, saved = 0;
+        if (saveDir != null) Directory.CreateDirectory(saveDir);
+        var sb = new System.Text.StringBuilder();
+        using var cap = VideoCapture.Start(dev, mode);
+        long end = Environment.TickCount64 + (long)(double.Parse(a[1]) * 1000), last = 0, lastIndex = 0; int n = 0, changes = 0, missed = 0;
+        while (Environment.TickCount64 < end)
+        {
+            if (!cap.FrameReady.WaitOne(500)) continue;
+            var f = cap.TakeLatest(); if (f == null) continue;
+            double dt = last == 0 ? 0 : (f.ArrivedTicks - last) * 1000.0 / System.Diagnostics.Stopwatch.Frequency; last = f.ArrivedTicks;
+            if (lastIndex != 0 && f.Index != lastIndex + 1) missed += (int)(f.Index - lastIndex - 1);
+            lastIndex = f.Index;
+            bool change = f.ChangeIndex == f.Index; n++; if (change) changes++;
+            if (n <= 240) sb.AppendLine($"{f.Index,5} +{dt,5:0.0} ms  {(change ? "NEW" : "rep")}  any {f.DiffAny:P2} big {f.DiffBig:P3} mean {f.DiffMean:0.000}");
+            if (saveDir != null && saved < saveCount && n > 30)
+            {
+                File.WriteAllBytes(Path.Combine(saveDir, $"f{saved:00}.raw"), f.Data.AsSpan(0, f.Length).ToArray());
+                File.AppendAllText(Path.Combine(saveDir, "index.txt"), $"f{saved:00}.raw {f.Format} {f.Width} {f.Height} {f.Pitch} {(change ? "NEW" : "rep")} {f.Index}\n");
+                saved++;
+            }
+            cap.Return(f);
+        }
+        sb.Insert(0, $"{mode.Key}: {n} frames, {changes} new pictures, {missed} missed by this loop -> game runs at about {changes / double.Parse(a[1]):0.0} fps\n");
+        File.WriteAllText(a[0], sb.ToString());
+    }
+
     /// <summary>"--rendertest out.png file.raw FORMAT W H PITCH": runs a saved frame through the real GPU renderer in an invisible window.</summary>
     public static void RenderTest(string[] a)
     {

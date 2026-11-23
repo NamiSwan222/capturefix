@@ -87,6 +87,42 @@ connected to the CPU), so 0% is lost.
 Low delay: only the newest frame is kept, and each is drawn the moment it arrives (flip-model
 swap chain, one frame queued at most).
 
+## Frame generation (G)
+
+A 30 fps game reaches the capture card as 60 frames a second with every picture sent twice.
+CaptureFix spots the repeats (they arrive bit-identical), so it knows the game's real frame rate,
+and draws in-between pictures on the GPU: a 30 fps game is shown at 60 (2x), 90 (3x) or 120 (4x)
+pictures a second, a 60 fps game at 120 or 240. It never goes above the monitor's refresh rate.
+
+How ([framegen.hlsl](src/CaptureFix/Shaders/framegen.hlsl), [FrameGen.cs](src/CaptureFix/Video/FrameGen.cs)):
+
+1. Each converted frame gets a half-size brightness map with mip levels down to about 30x17.
+2. Motion search, coarsest level first, from the in-between picture's point of view: for every spot
+   it finds the vector where the previous frame and the next frame agree best (5x5 patch, with half
+   and quarter texel steps). No holes to fill, because every output pixel gets a vector.
+3. A 3x3 median removes stray vectors; near edges each pixel may take a neighbour's vector when
+   that fits clearly better.
+4. Both frames are fetched along the vector and mixed. Where "nothing moved" fits better than the
+   motion (HUD, map, subtitles), the pixel is left alone so text stays sharp.
+5. Pictures are spread evenly over the game frame with 1 ms timers: generated ones first, the real
+   frame last. Scene cuts and uneven frame rates are shown as they are.
+
+The cost is delay: the next frame must arrive before the in-between one can be drawn. At 2x a
+30 fps game gets 16.7 ms extra (25 ms at 4x); a 60 fps game 8.3 ms.
+
+Measured (RTX 5080, 1080p): generating a picture takes 0.8 ms (Fast) or 1.9 ms (High). Against the
+true middle frame of 13 test clips (pans up to 200 px a frame, zoom, a moving object, a static HUD),
+generated pictures score 29.6 to 52.8 dB PSNR where simply blending the two frames scores 15.6 to
+29.3 dB. Picture spacing in a live 30 to 60 fps run: 16.67 ms on average, 0.6 ms deviation.
+
+Known limits: a thin halo around objects that move against the background, and slight fringing
+around HUD text over a fast-moving scene. It is tested on synthetic motion so far, not yet tuned on
+long real gameplay.
+
+`CaptureFix.exe --fgtest out.txt A.raw B.raw C.raw NV12 1920 1080 1920 [pngPrefix]` scores a generated
+picture against a real middle frame; `--fgplay` runs saved frames through the live renderer and
+reports pacing; `--cadence out.txt 6` logs the game's real frame rate from the card.
+
 ## Use
 
 Install it from the [latest release](https://github.com/NamiSwan222/capturefix/releases/latest) and
@@ -98,6 +134,7 @@ a time.
 | Right-click | All options |
 | F11 / double-click / Alt+Enter | Full screen (Esc to leave) |
 | 1 / 2 | PS5 / Switch 2 profile |
+| G | Frame generation: off, 2x, 3x, 4x |
 | H | Signal: auto-detect, always HDR, always SDR |
 | S | Settings (picture, sound, video, consoles, window, keys) |
 | A | Picture settings |
@@ -108,7 +145,7 @@ a time.
 
 ## Settings (S)
 
-- **Picture:** signal (auto / HDR / SDR), brightness range (auto / limited / full), HDR colour style (Natural / Vivid), HDR brightness, HDR peak, contrast,
+- **Picture:** frame generation (off / 2x / 3x / 4x) and its quality, signal (auto / HDR / SDR), brightness range (auto / limited / full), HDR colour style (Natural / Vivid), HDR brightness, HDR peak, contrast,
   black level, colour, warmth, sharpness, gamma (2.2 / 2.4 dark room / 2.0 bright room), full range,
   real HDR on an HDR monitor.
 - **Sound:** output device, volume, mute, audio delay, restart audio.
@@ -175,7 +212,9 @@ after 4 seconds and quits.
 ## Layout
 
 - `Video/VideoCapture.cs`: finds the card, lists modes, reads frames (newest only).
-- `Video/Renderer.cs`: Direct3D 11 upload, draw, HDR output, screenshots.
+- `Video/Renderer.cs`: Direct3D 11 upload, draw, HDR output, screenshots, frame pacing.
+- `Video/FrameGen.cs`, `Shaders/framegen.hlsl`: frame generation.
+- `Video/SignalAnalyzer.cs`: HDR / range detection.
 - `Shaders/video.hlsl`: colour conversion and tone mapping.
 - `Audio/AudioBridge.cs`: game audio passthrough that follows the card's real rate.
 - `Updater.cs`: GitHub release check, verified download, silent install.

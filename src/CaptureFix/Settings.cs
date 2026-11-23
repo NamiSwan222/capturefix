@@ -21,6 +21,8 @@ public sealed class Profile
     public float Gamma { get; set; } = 2.2f;
     public float Warmth { get; set; }
     public float Sharpness { get; set; }
+    public int FrameGen { get; set; } = 2;         // pictures shown per game frame: 0 = off, 2, 3, 4
+    public int FrameGenQuality { get; set; } = 1;  // 0 = fast, 1 = high
     public int AudioDelayMs { get; set; } = 50;
     public float Volume { get; set; } = 1f;
 }
