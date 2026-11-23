@@ -136,6 +136,7 @@ public sealed class MainForm : Form
             Toast($"CaptureFix updated to {Updater.Current}");
             Updater.CleanupDownloads();
         }
+        Updater.CleanupOldDownloads();
         _updateTimer.Tick += (_, _) => { _updateTimer.Interval = 6 * 60 * 60 * 1000; _ = CheckUpdatesAsync(false); };
         _updateTimer.Start();
         if (_justUpdated) return;

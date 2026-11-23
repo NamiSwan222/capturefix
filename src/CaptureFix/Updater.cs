@@ -128,6 +128,25 @@ public static class Updater
         });
     }
 
+    /// <summary>Deletes downloaded installers for this version or older. Updates that install when
+    /// the app closes never come back through "--updated", so their installers would pile up.</summary>
+    public static void CleanupOldDownloads()
+    {
+        try
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "CaptureFix-Update");
+            if (!Directory.Exists(dir)) return;
+            foreach (var file in Directory.GetFiles(dir, "CaptureFix-Setup-*.exe"))
+            {
+                var m = Regex.Match(Path.GetFileName(file), @"(\d+)\.(\d+)\.(\d+)");
+                if (!m.Success) continue;
+                var v = new Version(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value));
+                if (v <= Current) { try { File.Delete(file); } catch { } }
+            }
+        }
+        catch { }
+    }
+
     /// <summary>Runs the installer silently. It closes CaptureFix and updates it; with <paramref name="relaunch"/> it then starts the new version.</summary>
     public static void StartInstaller(string path, bool relaunch) =>
         Process.Start(new ProcessStartInfo(path, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /UPDATE" + (relaunch ? "" : " /NOLAUNCH")) { UseShellExecute = true });
