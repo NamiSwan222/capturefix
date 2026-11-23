@@ -9,7 +9,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyTitle>CaptureFix</AssemblyTitle>
     <Product>CaptureFix</Product>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <ApplicationIcon>Assets\CaptureFix.ico</ApplicationIcon>
     <Description>Low-latency capture card viewer with correct HDR colors and in-sync game audio</Description>
     <ApplicationManifest>app.manifest</ApplicationManifest>

@@ -223,7 +223,7 @@ public sealed class MainForm : Form
             Saturation = p.Saturation, HdrSdrWhite = _s.HdrSdrWhite, AllowHdrOutput = _s.AllowHdrOutput,
             ToneMap = p.ToneMap, Contrast = p.Contrast, BlackLevel = p.BlackLevel, Gamma = p.Gamma,
             Warmth = p.Warmth, Sharpness = p.Sharpness,
-            FrameGen = p.FrameGen, FrameGenQuality = p.FrameGenQuality,
+            FrameGen = p.FrameGen, FrameGenQuality = p.FrameGenQuality, SharpUpscale = _s.SharpUpscale,
         };
         _renderer.Invalidate();
     }
@@ -665,6 +665,7 @@ public sealed class MainForm : Form
             lines.Add($"{p.Name}  ·  {cap.Mode}");
             lines.Add($"{_renderer.PresentFps:0.0} fps  ·  card to screen {_renderer.LatencyMs:0.0} ms (+ display)");
             lines.Add("Frame generation: " + FrameGenStatus);
+            lines.Add($"Scaling {cap.Mode.Width}x{cap.Mode.Height} to {_renderer.ShownWidth}x{_renderer.ShownHeight}: {(_renderer.SharpScalingActive ? "sharp (bicubic)" : "plain")}");
             string hdrSrc = p.HdrMode == 0 ? "auto" : "set", rngSrc = p.RangeMode == 0 ? "auto" : "set";
             lines.Add($"Signal {(_renderer.EffectiveHdr ? "HDR10" : "SDR")} ({hdrSrc}), {(_renderer.EffectiveFullRange ? "full" : "limited")} range ({rngSrc}); black {_renderer.Signal.BlackCode}, white {_renderer.Signal.WhiteCode}  ·  output {(_renderer.OutputIsHdr ? "HDR (scRGB)" : "SDR")}{(_renderer.MonitorHdr ? ", monitor in HDR" : "")}");
             lines.Add($"Audio {_audio.InputName ?? "-"} → {_audio.OutputName ?? "-"}  ·  buffer {_audio.BufferedMs:0}/{_audio.DelayMs} ms  ·  speed {_audio.SpeedPercent:+0.00;-0.00}%  ·  gaps {_audio.Underruns} (cushion +{_audio.ExtraMs} ms)");

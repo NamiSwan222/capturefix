@@ -43,6 +43,7 @@ public sealed class AppSettings
     public bool HideCursor { get; set; } = true;
     public bool StartFullscreen { get; set; }
     public bool ShowTips { get; set; } = true;
+    public bool SharpUpscale { get; set; } = true;
     public bool AutoUpdate { get; set; } = true;
     public string? ScreenshotDir { get; set; }
 

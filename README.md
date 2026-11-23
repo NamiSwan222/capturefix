@@ -115,13 +115,44 @@ true middle frame of 13 test clips (pans up to 200 px a frame, zoom, a moving ob
 generated pictures score 29.6 to 52.8 dB PSNR where simply blending the two frames scores 15.6 to
 29.3 dB. Picture spacing in a live 30 to 60 fps run: 16.67 ms on average, 0.6 ms deviation.
 
-Known limits: a thin halo around objects that move against the background, and slight fringing
-around HUD text over a fast-moving scene. It is tested on synthetic motion so far, not yet tuned on
-long real gameplay.
+On real gameplay (70 consecutive GTA VI frames from a PS5, camera moving around the character, a
+van driving past): making the picture between frames k and k+2 and comparing it with the real
+frame k+1 (twice the motion of normal use) scores 38.2 dB on average against 34.5 dB for blending,
+and wins in 67 of 68 cases. Repeated frames from a real console are not bit-identical: about 25% of
+pixels flicker by one or two levels (dithering), so a repeat is "under 0.05% of pixels changed by
+more than 2/255".
+
+Each spot also tries the vector it had in the previous generated picture, which keeps hold of fast
+objects with little detail once they have been found.
+
+Known limits: a thin halo around objects that move against the background (visible at the back
+edge of a passing car), and slight fringing around HUD text over a fast-moving scene.
 
 `CaptureFix.exe --fgtest out.txt A.raw B.raw C.raw NV12 1920 1080 1920 [pngPrefix]` scores a generated
 picture against a real middle frame; `--fgplay` runs saved frames through the live renderer and
-reports pacing; `--cadence out.txt 6` logs the game's real frame rate from the card.
+reports pacing; `--cadence out.txt 6 MODE dir 70` logs the game's real frame rate from the card and
+saves 70 new frames; `--fgseq out.txt dir` scores frame generation over such a saved sequence.
+
+## Sharp upscaling
+
+A 1080p capture shown on a 1440p or 4K screen has to be enlarged. With "Sharp upscaling" on
+(Settings > Picture, on by default) CaptureFix uses a Catmull-Rom bicubic filter with a halo limit
+instead of plain bilinear, for real and generated frames alike. Measured against the true sharper
+picture at the same 1.33x factor: +1.3 dB on real GTA VI frames, +1.0 dB on a detailed photo, at
+0.04 ms a frame. `--scaletest` produces both versions of a saved frame.
+
+## What a capture card viewer can and can't do with the GPU
+
+CaptureFix receives finished pictures from the console, not the game's 3D scene. So features that
+need the scene (ray tracing, path tracing, DLSS, higher render resolution, better textures) are
+not possible here: they can only happen inside the game on the console. What the GPU can do to a
+finished picture is what CaptureFix does: frame generation, sharp upscaling, HDR tone mapping,
+sharpening and colour controls.
+
+NVIDIA's RTX Video Super Resolution (AI upscaling) was tried through the Direct3D video processor
+extension. On the test PC the driver accepted the request but returned exactly the same picture
+with it on and off, so it is not used. It probably needs "RTX Video Enhancement" switched on in the
+NVIDIA app; untested with that on.
 
 ## Use
 
@@ -145,7 +176,7 @@ a time.
 
 ## Settings (S)
 
-- **Picture:** frame generation (off / 2x / 3x / 4x) and its quality, signal (auto / HDR / SDR), brightness range (auto / limited / full), HDR colour style (Natural / Vivid), HDR brightness, HDR peak, contrast,
+- **Picture:** frame generation (off / 2x / 3x / 4x) and its quality, sharp upscaling, signal (auto / HDR / SDR), brightness range (auto / limited / full), HDR colour style (Natural / Vivid), HDR brightness, HDR peak, contrast,
   black level, colour, warmth, sharpness, gamma (2.2 / 2.4 dark room / 2.0 bright room), full range,
   real HDR on an HDR monitor.
 - **Sound:** output device, volume, mute, audio delay, restart audio.

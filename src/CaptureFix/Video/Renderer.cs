@@ -27,6 +27,7 @@ public sealed class ColorSettings
     public bool AllowHdrOutput;     // show real HDR when the monitor is in HDR mode
     public int FrameGen;            // 0/1 = off, 2-4 = pictures shown per game frame
     public int FrameGenQuality = 1; // 0 = fast (quarter-size motion field), 1 = high (half-size)
+    public bool SharpUpscale;       // bicubic instead of bilinear when the window is bigger than the picture
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -197,11 +198,13 @@ public sealed class Renderer : IDisposable
                 {
                     Signal.Analyze(frame);
                     int want = Color.FrameGen;
+                    _fg.SharpUpscale = Color.SharpUpscale;
                     if (want < 2)
                     {
                         if (_fgShowing) ResetFrameGen();
                         Upload(frame);
-                        Draw();
+                        if (UpscalingNow()) { PushToFrameGen(); PresentGenerated(1f); }   // convert at game size, then scale sharply
+                        else Draw();
                         drew = true;
                         latencyAcc += (Stopwatch.GetTimestamp() - frame.ArrivedTicks) * 1000.0 / Stopwatch.Frequency;
                         latencyCount++; fpsCount++;
@@ -246,7 +249,7 @@ public sealed class Renderer : IDisposable
                 }
                 // Settings changed (or the signal was re-detected) while the picture stands still:
                 // redraw the newest frame with them. Moving pictures pick them up on the next frame.
-                if (_dirty && !drew && _pending.Count == 0) Draw();
+                if (_dirty && !drew && _pending.Count == 0) Redraw();
                 _dirty = false;
 
                 // Show whatever is due. If we fell behind, skip straight to the latest due picture.
@@ -285,6 +288,26 @@ public sealed class Renderer : IDisposable
     }
 
     long _fgArrived;
+
+    public int ShownWidth => _texW > 0 ? (int)Letterbox().Width : 0;
+    public int ShownHeight => _texW > 0 ? (int)Letterbox().Height : 0;
+    public bool SharpScalingActive => UpscalingNow();
+
+    /// <summary>The picture is being shown larger than captured and sharp upscaling is on.</summary>
+    bool UpscalingNow() => Color.SharpUpscale && _haveFrame && _texW > 0 && Letterbox().Width > _texW * 1.02f;
+
+    /// <summary>Shows the newest frame again with the current settings (picture standing still).</summary>
+    void Redraw()
+    {
+        _fg.SharpUpscale = Color.SharpUpscale;
+        bool viaFrameGen = _haveFrame && _srvY != null && _fg.HasFrame && _fg.Width == _texW && _fg.Height == _texH
+                           && (_fgShowing || UpscalingNow());
+        if (!viaFrameGen) { Draw(); return; }
+        _fg.HdrOut = _hdrSwap;
+        DrawSource(_fg.NewestRtv, new Viewport(0, 0, _texW, _texH));
+        _fg.RefreshNewest();
+        PresentGenerated(1f);
+    }
 
     /// <summary>Testing: when set, every picture shown is logged as (time, alpha); alpha 1 = real frame, -1 = direct.</summary>
     public List<(long ticks, float alpha)>? PresentLog;
@@ -494,7 +517,7 @@ public sealed class Renderer : IDisposable
         var snap = Interlocked.Exchange(ref _snapshotPath, null);
         if (snap != null)
         {
-            try { SaveBackBuffer(snap); SnapshotSaved?.Invoke(snap, null); }
+            try { SaveBackBuffer(snap); }
             catch (Exception ex) { SnapshotSaved?.Invoke(snap, ex.Message); }
         }
         _swap!.Present(0, PresentFlags.None);
@@ -514,17 +537,26 @@ public sealed class Renderer : IDisposable
     /// <summary>Testing: makes the picture between frames a and c and compares it with the real middle frame b.</summary>
     public string FrameGenTest(VideoFrame a, VideoFrame b, VideoFrame c, string outPrefix, int finestLevel, float smooth, float staticBias)
     {
+        var (gen, blend, repeat, ms) = FrameGenScore(a, b, c, outPrefix, finestLevel, smooth, staticBias, true);
+        return $"generated {gen:0.00} dB | plain blend {blend:0.00} dB | repeat frame {repeat:0.00} dB | {ms:0.00} ms per generated frame";
+    }
+
+    /// <summary>Testing: PSNR against the real middle frame of (generated, plain blend, repeated frame), and GPU ms.</summary>
+    public (double gen, double blend, double repeat, double ms) FrameGenScore(VideoFrame a, VideoFrame b, VideoFrame c, string outPrefix, int finestLevel, float smooth, float staticBias, bool benchmark)
+    {
         for (int i = 0; i < 150; i++) Signal.Analyze(b, force: true);
         UpdateOutputMode();
         ResizeSwapChain(); _resize = false;
-        _fg.FinestLevel = finestLevel; _fg.Smooth = smooth; _fg.StaticBias = staticBias;
-        _fg.Reset();
+        _fg.FinestLevel = finestLevel;
+        if (Environment.GetEnvironmentVariable("CF_SMOOTH") == null) _fg.Smooth = smooth;
+        if (Environment.GetEnvironmentVariable("CF_STATIC") == null) _fg.StaticBias = staticBias;
+        _fg.Reset(keepHistory: true);
         Upload(b); PushToFrameGen(); byte[] truth = _fg.ReadNewest();
-        _fg.Reset();
+        _fg.Reset(keepHistory: true);
         Upload(a); PushToFrameGen(); byte[] fa = _fg.ReadNewest();
         Upload(c); PushToFrameGen(); byte[] fc = _fg.ReadNewest();
         byte[] gen = _fg.ReadInterpolated(0.5f);
-        double ms = _fg.Benchmark();
+        double ms = benchmark ? _fg.Benchmark() : 0;
 
         static double Psnr(byte[] x, byte[] y)
         {
@@ -542,16 +574,31 @@ public sealed class Renderer : IDisposable
             for (int i = 0; i < err.Length; i++) err[i] = (i & 3) == 3 ? (byte)255 : (byte)Math.Min(255, Math.Abs(gen[i] - truth[i]) * 4);
             SavePng(outPrefix + "_error_x4.png", err);
         }
-        return $"generated {Psnr(gen, truth):0.00} dB | plain blend {Psnr(blend, truth):0.00} dB | repeat frame {Psnr(fa, truth):0.00} dB | {ms:0.00} ms per generated frame";
+        return (Psnr(gen, truth), Psnr(blend, truth), Psnr(fa, truth), ms);
     }
 
-    void SavePng(string path, byte[] bgra)
+    void SavePng(string path, byte[] bgra) => SavePng(path, bgra, _texW, _texH);
+
+    static void SavePng(string path, byte[] bgra, int w, int h)
     {
-        using var bmp = new System.Drawing.Bitmap(_texW, _texH, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
-        var bd = bmp.LockBits(new System.Drawing.Rectangle(0, 0, _texW, _texH), System.Drawing.Imaging.ImageLockMode.WriteOnly, bmp.PixelFormat);
-        for (int y = 0; y < _texH; y++) Marshal.Copy(bgra, y * _texW * 4, bd.Scan0 + y * bd.Stride, _texW * 4);
+        using var bmp = new System.Drawing.Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
+        var bd = bmp.LockBits(new System.Drawing.Rectangle(0, 0, w, h), System.Drawing.Imaging.ImageLockMode.WriteOnly, bmp.PixelFormat);
+        for (int y = 0; y < h; y++) Marshal.Copy(bgra, y * w * 4, bd.Scan0 + y * bd.Stride, w * 4);
         bmp.UnlockBits(bd);
         bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+    }
+
+    /// <summary>Testing: scales a frame to w x h with the plain and the sharp scaler and saves both.</summary>
+    public string ScaleTest(VideoFrame f, int w, int h, string outPrefix)
+    {
+        for (int i = 0; i < 150; i++) Signal.Analyze(f, force: true);
+        UpdateOutputMode();
+        ResizeSwapChain(); _resize = false;
+        _fg.Reset();
+        Upload(f); PushToFrameGen();
+        SavePng(outPrefix + "_bilinear.png", _fg.ReadScaled(w, h, false), w, h);
+        SavePng(outPrefix + "_sharp.png", _fg.ReadScaled(w, h, true), w, h);
+        return $"bilinear {_fg.BenchmarkScale(w, h, false):0.000} ms, sharp {_fg.BenchmarkScale(w, h, true):0.000} ms";
     }
 
     /// <summary>Testing: draws one frame without the render thread and saves exactly what would be shown.</summary>
@@ -561,6 +608,7 @@ public sealed class Renderer : IDisposable
         UpdateOutputMode();
         ResizeSwapChain(); _resize = false;
         Upload(f);
+        _snapshotSync = true;
         _snapshotPath = pngPath;   // Draw saves it just before presenting
         Draw();
     }
@@ -572,6 +620,8 @@ public sealed class Renderer : IDisposable
     /// <summary>Saves the next drawn picture, exactly as shown, to a PNG.</summary>
     public void RequestSnapshot(string path) { _snapshotPath = path; Invalidate(); }
 
+    /// <summary>Copies the picture about to be shown, then encodes the PNG on another thread so a
+    /// screenshot doesn't freeze the game picture (encoding takes 100+ ms at 1440p).</summary>
     unsafe void SaveBackBuffer(string path)
     {
         using var back = _swap!.GetBuffer<ID3D11Texture2D>(0);
@@ -579,21 +629,31 @@ public sealed class Renderer : IDisposable
         d.Usage = ResourceUsage.Staging; d.BindFlags = BindFlags.None; d.CPUAccessFlags = CpuAccessFlags.Read; d.MiscFlags = ResourceOptionFlags.None;
         using var staging = _device.CreateTexture2D(d);
         _ctx.CopyResource(staging, back);
+        int w = (int)d.Width, h = (int)d.Height;
+        bool hdr = d.Format != Format.B8G8R8A8_UNorm;
+        int rowBytes = w * (hdr ? 8 : 4);
+        var pixels = new byte[rowBytes * h];
         var map = _ctx.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
         try
         {
-            int w = (int)d.Width, h = (int)d.Height;
+            fixed (byte* dst = pixels)
+                for (int y = 0; y < h; y++)
+                    Buffer.MemoryCopy((byte*)map.DataPointer + (long)y * map.RowPitch, dst + (long)y * rowBytes, rowBytes, rowBytes);
+        }
+        finally { _ctx.Unmap(staging, 0); }
+        float white = Color.HdrSdrWhite / 80f;
+
+        void Encode()
+        {
             using var bmp = new System.Drawing.Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
             var bd = bmp.LockBits(new System.Drawing.Rectangle(0, 0, w, h), System.Drawing.Imaging.ImageLockMode.WriteOnly, bmp.PixelFormat);
-            float white = Color.HdrSdrWhite / 80f;
-            for (int y = 0; y < h; y++)
+            fixed (byte* srcAll = pixels)
             {
-                byte* src = (byte*)map.DataPointer + (long)y * map.RowPitch;
-                byte* dst = (byte*)bd.Scan0 + (long)y * bd.Stride;
-                if (d.Format == Format.B8G8R8A8_UNorm)
-                    Buffer.MemoryCopy(src, dst, bd.Stride, w * 4);
-                else
+                for (int y = 0; y < h; y++)
                 {
+                    byte* src = srcAll + (long)y * rowBytes;
+                    byte* dst = (byte*)bd.Scan0 + (long)y * bd.Stride;
+                    if (!hdr) { Buffer.MemoryCopy(src, dst, bd.Stride, w * 4); continue; }
                     // scRGB -> SDR preview: SDR white = 1.0, clipped above.
                     Half* px = (Half*)src;
                     for (int x = 0; x < w; x++)
@@ -611,8 +671,16 @@ public sealed class Renderer : IDisposable
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
             bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
         }
-        finally { _ctx.Unmap(staging, 0); }
+
+        if (_snapshotSync) { Encode(); SnapshotSaved?.Invoke(path, null); return; }
+        Task.Run(() =>
+        {
+            try { Encode(); SnapshotSaved?.Invoke(path, null); }
+            catch (Exception ex) { SnapshotSaved?.Invoke(path, ex.Message); }
+        });
     }
+
+    bool _snapshotSync;   // tests: finish writing before returning
 
     public void Dispose()
     {

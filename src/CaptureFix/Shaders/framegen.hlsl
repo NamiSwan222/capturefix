@@ -34,6 +34,8 @@ cbuffer FrameGen : register(b0)
     float  TapStep;     // spacing of the patch samples, in texels
     float  Select;      // final pass: pick among neighbouring vectors, this many texels apart (0 = off)
     float  SelMargin;   // how much better a neighbouring vector must be to replace the one under the pixel
+    int    HasHistory;  // T3 holds the motion field of the previous generated picture
+    float3 Pad;
 };
 
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -66,7 +68,41 @@ float4 PSBlit(VSOut i) : SV_Target
     return float4(T0.SampleLevel(Linear, i.uv, 0).rgb, 1);
 }
 
-// T0 = previous luma, T1 = next luma, T2 = coarser motion field.
+// Sharp upscaling for a window bigger than the game picture: Catmull-Rom bicubic (16 texels, done
+// in 9 bilinear fetches), then pulled back toward the range of the 4 nearest texels so edges get
+// crisp without bright or dark halos. Texel = one source texel in UV; Alpha = halo limit (0..1).
+float4 PSScale(VSOut i) : SV_Target
+{
+    float2 size = 1.0 / Texel;
+    float2 pos = i.uv * size;
+    float2 p1 = floor(pos - 0.5) + 0.5;
+    float2 f = pos - p1;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 t0 = (p1 - 1.0) * Texel, t3 = (p1 + 2.0) * Texel, t12 = (p1 + w2 / w12) * Texel;
+
+    float3 c = 0;
+    c += T0.SampleLevel(Linear, float2(t0.x, t0.y), 0).rgb * (w0.x * w0.y);
+    c += T0.SampleLevel(Linear, float2(t12.x, t0.y), 0).rgb * (w12.x * w0.y);
+    c += T0.SampleLevel(Linear, float2(t3.x, t0.y), 0).rgb * (w3.x * w0.y);
+    c += T0.SampleLevel(Linear, float2(t0.x, t12.y), 0).rgb * (w0.x * w12.y);
+    c += T0.SampleLevel(Linear, float2(t12.x, t12.y), 0).rgb * (w12.x * w12.y);
+    c += T0.SampleLevel(Linear, float2(t3.x, t12.y), 0).rgb * (w3.x * w12.y);
+    c += T0.SampleLevel(Linear, float2(t0.x, t3.y), 0).rgb * (w0.x * w3.y);
+    c += T0.SampleLevel(Linear, float2(t12.x, t3.y), 0).rgb * (w12.x * w3.y);
+    c += T0.SampleLevel(Linear, float2(t3.x, t3.y), 0).rgb * (w3.x * w3.y);
+
+    float2 q = p1 * Texel;
+    float3 a = T0.SampleLevel(Linear, q, 0).rgb, b = T0.SampleLevel(Linear, q + float2(Texel.x, 0), 0).rgb;
+    float3 d = T0.SampleLevel(Linear, q + float2(0, Texel.y), 0).rgb, e = T0.SampleLevel(Linear, q + Texel, 0).rgb;
+    float3 lo = min(min(a, b), min(d, e)), hi = max(max(a, b), max(d, e));
+    return float4(lerp(c, clamp(c, lo, hi), Alpha), 1);
+}
+
+// T0 = previous luma, T1 = next luma, T2 = coarser motion field, T3 = last picture's motion field.
 float MatchCost(float2 uv, float2 v)
 {
     float2 pa = uv - Alpha * v, pb = uv + (1.0 - Alpha) * v;
@@ -115,6 +151,20 @@ float4 PSMotion(VSOut i) : SV_Target
             if (c < bestCost) { bestCost = c; best = v; }
         }
     }
+    // Things keep moving the way they did a moment ago: try the vector this spot had in the
+    // previous generated picture. This is what keeps hold of a fast object with little detail
+    // (a dark van, a plain wall) once it has been found.
+    if (HasHistory)
+    {
+        static const float2 H[5] = { float2(0, 0), float2(1, 0), float2(-1, 0), float2(0, 1), float2(0, -1) };
+        [unroll] for (int k = 0; k < 5; k++)
+        {
+            float2 v = T3.SampleLevel(Linear, uv + H[k] * Texel * 2.0, 0).xy;
+            float c = MatchCost(uv, v) + Smooth * 0.5;
+            if (c < bestCost) { bestCost = c; best = v; }
+        }
+    }
+
     // Sub-texel steps: without them vectors snap to whole texels of this level, and a slow pan
     // comes out a pixel or two off, which blurs fine detail.
     if (Refine > 0.5)

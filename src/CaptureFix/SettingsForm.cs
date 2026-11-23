@@ -105,6 +105,9 @@ public sealed class SettingsForm : Form
         Disposed += (_, _) => fgTimer.Dispose();
         _loaders.Add(() => fgStatus.Text = _main.FrameGenStatus);
 
+        Check(page, "Sharp upscaling", "When the window is bigger than the game picture (1080p on a 1440p or 4K screen), scale it up with a sharper filter. Edges and text come out crisper.",
+            () => _s.SharpUpscale, v => { _s.SharpUpscale = v; ApplyPicture(); });
+
         Section(page, "HDR");
         Choice(page, "Signal", new[] { "Detect automatically (recommended)", "Always HDR10", "Always SDR" },
             "CaptureFix reads the picture to tell HDR from SDR. Only force it if detection gets it wrong. Hotkey: H cycles the choices.",

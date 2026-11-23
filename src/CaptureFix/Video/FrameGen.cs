@@ -15,6 +15,7 @@ struct FrameGenParams
     public int HasCoarse, Radius;
     public float HdrOut, Smooth, Cut, StaticBias, Refine, EdgeCost;
     public int Taps; public float TapStep, Select, SelMargin;
+    public int HasHistory; public float Pad0, Pad1, Pad2;
 }
 
 /// <summary>
@@ -28,7 +29,7 @@ public sealed class FrameGen : IDisposable
     readonly ID3D11Device _device;
     readonly ID3D11DeviceContext _ctx;
     readonly ID3D11VertexShader _vs;
-    readonly ID3D11PixelShader _psLuma, _psMotion, _psMedian, _psInterp, _psBlit;
+    readonly ID3D11PixelShader _psLuma, _psMotion, _psMedian, _psInterp, _psBlit, _psScale;
     readonly ID3D11SamplerState _sampler;
     readonly ID3D11Buffer _cb;
 
@@ -45,6 +46,9 @@ public sealed class FrameGen : IDisposable
     Target[] _luma = Array.Empty<Target>();     // half size, mip-mapped
     Target[] _flowRaw = Array.Empty<Target>(), _flow = Array.Empty<Target>();   // per luma mip level
     Target? _out;                               // off-screen result, for tests
+    Target? _history;                           // motion field of the previous generated picture
+    bool _hasHistory;
+    int _coarseRadius = 3;
     int _w, _h, _coarsest, _finest;
     Format _format;
     int _frames;
@@ -59,6 +63,12 @@ public sealed class FrameGen : IDisposable
     public float Select { get; set; } = 1.5f;
     public float SelMargin { get; set; } = 0.03f;
     public bool HdrOut { get; set; }
+    public bool UseHistory { get; set; } = true;
+    /// <summary>Use the bicubic scaler when the picture is shown larger than it was captured.</summary>
+    public bool SharpUpscale { get; set; }
+    /// <summary>How much of the bicubic overshoot (halos) to remove: 0 = none, 1 = all.</summary>
+    public float AntiRing { get; set; } = 0.8f;
+    public bool HasFrame => _frames >= 1;
 
     public bool HasPair => _frames >= 2;
     public int Width => _w;
@@ -73,6 +83,11 @@ public sealed class FrameGen : IDisposable
         if (Env("CF_TAPSTEP") is float ts) TapStep = ts;
         if (Env("CF_SELECT") is float se) Select = se;
         if (Env("CF_SELMARGIN") is float sm) SelMargin = sm;
+        if (Env("CF_SMOOTH") is float smo) Smooth = smo;
+        if (Env("CF_STATIC") is float sb) StaticBias = sb;
+        if (Env("CF_RADIUS") is float cr) _coarseRadius = (int)cr;
+        if (Env("CF_HISTORY") is float hi) UseHistory = hi > 0;
+        if (Env("CF_ANTIRING") is float ar) AntiRing = ar;
         _device = device; _ctx = ctx; _sampler = sampler;
         string src;
         using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("CaptureFix.framegen.hlsl")!)
@@ -84,6 +99,7 @@ public sealed class FrameGen : IDisposable
         _psMedian = device.CreatePixelShader(C("PSMedian", "ps_5_0").Span);
         _psInterp = device.CreatePixelShader(C("PSInterp", "ps_5_0").Span);
         _psBlit = device.CreatePixelShader(C("PSBlit", "ps_5_0").Span);
+        _psScale = device.CreatePixelShader(C("PSScale", "ps_5_0").Span);
         _cb = device.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<FrameGenParams>(), BindFlags.ConstantBuffer));
     }
 
@@ -106,11 +122,12 @@ public sealed class FrameGen : IDisposable
     {
         foreach (var t in _rgb.Concat(_luma).Concat(_flowRaw).Concat(_flow)) t?.Dispose();
         _out?.Dispose(); _out = null;
+        _history?.Dispose(); _history = null; _hasHistory = false;
         _rgb = _luma = _flowRaw = _flow = Array.Empty<Target>();
     }
 
     /// <summary>Forget the stored frames (mode change, scene restart).</summary>
-    public void Reset() => _frames = 0;
+    public void Reset(bool keepHistory = false) { _frames = 0; if (!keepHistory) _hasHistory = false; }
 
     void Ensure(int w, int h, Format fmt)
     {
@@ -176,17 +193,31 @@ public sealed class FrameGen : IDisposable
     void Estimate(float alpha)
     {
         _finest = Math.Clamp(FinestLevel, 0, _coarsest);
+        bool history = UseHistory && _hasHistory && _history != null;
         for (int l = _coarsest; l >= _finest; l--)
         {
             var p = new FrameGenParams
             {
                 TexelX = 1f / _flow[l].W, TexelY = 1f / _flow[l].H, Lod = l, Alpha = alpha,
-                HasCoarse = l < _coarsest ? 1 : 0, Radius = l == _coarsest ? 3 : l >= _coarsest - 1 ? 2 : 1,
+                HasCoarse = l < _coarsest ? 1 : 0, Radius = l == _coarsest ? _coarseRadius : l >= _coarsest - 1 ? 2 : 1,
+                HasHistory = history ? 1 : 0,
                 HdrOut = HdrOut ? 1 : 0, Smooth = Smooth, Refine = 1, EdgeCost = EdgeCost, Taps = Taps, TapStep = TapStep,
             };
-            if (l < _coarsest) Pass(_flowRaw[l], _psMotion, p, _luma[0].Srv, _luma[1].Srv, _flow[l + 1].Srv);
-            else Pass(_flowRaw[l], _psMotion, p, _luma[0].Srv, _luma[1].Srv);
+            var coarse = l < _coarsest ? _flow[l + 1].Srv : _luma[0].Srv;   // unused at the coarsest level
+            if (history) Pass(_flowRaw[l], _psMotion, p, _luma[0].Srv, _luma[1].Srv, coarse, _history!.Srv);
+            else Pass(_flowRaw[l], _psMotion, p, _luma[0].Srv, _luma[1].Srv, coarse);
             Pass(_flow[l], _psMedian, p, _flowRaw[l].Srv);
+        }
+        // Remember this motion field for the next picture.
+        if (UseHistory)
+        {
+            if (_history == null || _history.W != _flow[_finest].W || _history.H != _flow[_finest].H)
+            {
+                _history?.Dispose();
+                _history = Make(_flow[_finest].W, _flow[_finest].H, Format.R16G16B16A16_Float);
+            }
+            _ctx.CopyResource(_history.Tex, _flow[_finest].Tex);
+            _hasHistory = true;
         }
     }
 
@@ -200,12 +231,57 @@ public sealed class FrameGen : IDisposable
             Alpha = alpha, HdrOut = HdrOut ? 1 : 0, Cut = cut ? 1 : 0, StaticBias = StaticBias, Select = Select, SelMargin = SelMargin,
             TexelX = 1f / _flow[_finest].W, TexelY = 1f / _flow[_finest].H,
         };
-        Pass(rtv, vp, _psInterp, p, _rgb[0].Srv, _rgb[1].Srv, _flow[_finest].Srv, _luma[0].Srv, _luma[1].Srv);
+        // With sharp upscaling the picture is made at the game's size first, then scaled like a real frame.
+        bool viaOut = SharpUpscale && vp.Width > _w * 1.02f;
+        if (viaOut) Pass(Out.Rtv, new Viewport(0, 0, _w, _h), _psInterp, p, _rgb[0].Srv, _rgb[1].Srv, _flow[_finest].Srv, _luma[0].Srv, _luma[1].Srv);
+        else Pass(rtv, vp, _psInterp, p, _rgb[0].Srv, _rgb[1].Srv, _flow[_finest].Srv, _luma[0].Srv, _luma[1].Srv);
+        if (viaOut) Blit(Out, rtv, vp);
+    }
+
+    void Blit(Target src, ID3D11RenderTargetView rtv, Viewport vp)
+    {
+        bool sharp = SharpUpscale && vp.Width > src.W * 1.02f;
+        Pass(rtv, vp, sharp ? _psScale : _psBlit, new FrameGenParams { TexelX = 1f / src.W, TexelY = 1f / src.H, Alpha = AntiRing }, src.Srv);
+    }
+
+    /// <summary>Where the newest frame lives, to redraw it in place with new picture settings.</summary>
+    public ID3D11RenderTargetView NewestRtv { get { _ctx.PSUnsetShaderResources(0, 5); return _rgb[1].Rtv; } }
+
+    /// <summary>Call after redrawing the newest frame in place.</summary>
+    public void RefreshNewest()
+    {
+        Pass(_luma[1], _psLuma, new FrameGenParams { HdrOut = HdrOut ? 1 : 0 }, _rgb[1].Srv);
+        _ctx.GenerateMips(_luma[1].Srv);
     }
 
     /// <summary>Draws the newest real frame.</summary>
-    public void DrawNewest(ID3D11RenderTargetView rtv, Viewport vp)
-        => Pass(rtv, vp, _psBlit, new FrameGenParams(), _rgb[1].Srv);
+    public void DrawNewest(ID3D11RenderTargetView rtv, Viewport vp) => Blit(_rgb[1], rtv, vp);
+
+    /// <summary>Testing: the newest frame scaled to w x h, as 8-bit BGRA.</summary>
+    public byte[] ReadScaled(int w, int h, bool sharp)
+    {
+        using var t = Make(w, h, _format);
+        bool old = SharpUpscale; SharpUpscale = sharp;
+        Blit(_rgb[1], t.Rtv, new Viewport(0, 0, w, h));
+        SharpUpscale = old;
+        return Read(t.Tex);
+    }
+
+    /// <summary>Testing: GPU milliseconds for one scale to w x h.</summary>
+    public double BenchmarkScale(int w, int h, bool sharp, int runs = 100)
+    {
+        using var t = Make(w, h, _format);
+        using var q = _device.CreateQuery(QueryType.Event, QueryFlags.None);
+        void Wait() { _ctx.End(q); _ctx.Flush(); while (!_ctx.GetData(q, out int done) || done == 0) Thread.SpinWait(50); }
+        bool old = SharpUpscale; SharpUpscale = sharp;
+        var vp = new Viewport(0, 0, w, h);
+        Blit(_rgb[1], t.Rtv, vp); Wait();
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
+        for (int i = 0; i < runs; i++) Blit(_rgb[1], t.Rtv, vp);
+        Wait();
+        SharpUpscale = old;
+        return (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency / runs;
+    }
 
     // ---------- test support ----------
 
@@ -244,10 +320,11 @@ public sealed class FrameGen : IDisposable
         var map = _ctx.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
         try
         {
-            var bytes = new byte[_w * _h * 4];
+            int w = (int)d.Width, h = (int)d.Height;
+            var bytes = new byte[w * h * 4];
             fixed (byte* dst = bytes)
-                for (int y = 0; y < _h; y++)
-                    Buffer.MemoryCopy((byte*)map.DataPointer + (long)y * map.RowPitch, dst + (long)y * _w * 4, _w * 4, _w * 4);
+                for (int y = 0; y < h; y++)
+                    Buffer.MemoryCopy((byte*)map.DataPointer + (long)y * map.RowPitch, dst + (long)y * w * 4, w * 4, w * 4);
             return bytes;
         }
         finally { _ctx.Unmap(staging, 0); }
@@ -256,6 +333,6 @@ public sealed class FrameGen : IDisposable
     public void Dispose()
     {
         Free();
-        _cb.Dispose(); _psBlit.Dispose(); _psInterp.Dispose(); _psMedian.Dispose(); _psMotion.Dispose(); _psLuma.Dispose(); _vs.Dispose();
+        _cb.Dispose(); _psScale.Dispose(); _psBlit.Dispose(); _psInterp.Dispose(); _psMedian.Dispose(); _psMotion.Dispose(); _psLuma.Dispose(); _vs.Dispose();
     }
 }
