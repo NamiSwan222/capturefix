@@ -32,7 +32,11 @@ cbuffer Params : register(b0)
     float Gamma;        // output encoding exponent, 2.2 = Windows/sRGB-like
     float Warmth;       // -1 (cool) .. 1 (warm)
     float Sharpness;    // 0..1
-    float3 Pad;
+    float GamutOn;      // 1 = convert to the monitor's own primaries (wide-colour screens)
+    float2 Pad;
+    float4 Gamut0;      // rows of the BT.709 -> monitor matrix
+    float4 Gamut1;
+    float4 Gamut2;
 };
 
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -163,6 +167,10 @@ float3 WhiteBalance(float3 lin)
 float3 Finish(float3 lin)
 {
     lin = WhiteBalance(ApplySaturation(max(lin, 0)));
+    // A wide-colour monitor shows standard numbers too saturated (reds most of all). Give it the
+    // numbers that produce the intended colours on its own primaries.
+    if (GamutOn > 0.5)
+        lin = max(float3(dot(Gamut0.xyz, lin), dot(Gamut1.xyz, lin), dot(Gamut2.xyz, lin)), 0);
     float3 e = pow(saturate(lin), 1.0 / Gamma);
     e = (e - 0.5) * Contrast + 0.5 + BlackLevel;
     return saturate(e);

@@ -44,6 +44,7 @@ public sealed class AppSettings
     public bool StartFullscreen { get; set; }
     public bool ShowTips { get; set; } = true;
     public bool SharpUpscale { get; set; } = true;
+    public int MonitorGamut { get; set; }           // wide-colour monitor correction: 0 = automatic, 1 = on, 2 = off
     public bool AutoUpdate { get; set; } = true;
     public string? ScreenshotDir { get; set; }
 

@@ -134,6 +134,18 @@ public sealed class SettingsForm : Form
         Choice(page, "Gamma", new[] { "2.2  (normal)", "2.4  (dark room)", "2.0  (bright room)" }, null,
             () => P.Gamma >= 2.3f ? 1 : P.Gamma <= 2.1f ? 2 : 0, v => { P.Gamma = v == 1 ? 2.4f : v == 2 ? 2.0f : 2.2f; ApplyPicture(); });
 
+        Section(page, "Monitor colors");
+        Choice(page, "Wide-color monitor", new[] { "Automatic (recommended)", "Always convert", "Off" },
+            "QD-OLED and many gaming monitors have deeper colors than a console picture is made for, so games look too saturated and too red on them. CaptureFix converts the colors for the monitor the window is on.",
+            () => Math.Clamp(_s.MonitorGamut, 0, 2), v => { _s.MonitorGamut = v; ApplyPicture(); });
+        var monStatus = new Label { AutoSize = true, ForeColor = Accent, MaximumSize = new Size(520, 0), Margin = new Padding(0, 2, 0, 4) };
+        page.Controls.Add(monStatus);
+        var monTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        monTimer.Tick += (_, _) => { if (page.Visible) monStatus.Text = "This monitor: " + _main.MonitorColorStatus; };
+        monTimer.Start();
+        Disposed += (_, _) => monTimer.Dispose();
+        _loaders.Add(() => monStatus.Text = "This monitor: " + _main.MonitorColorStatus);
+
         Section(page, "HDR monitor");
         Check(page, "Show real HDR on an HDR monitor", "Needs HDR turned on in Windows display settings. Leave off while sharing on Discord: Discord streams SDR.",
             () => _s.AllowHdrOutput, v => { _s.AllowHdrOutput = v; ApplyPicture(); });

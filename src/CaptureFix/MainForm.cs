@@ -223,7 +223,7 @@ public sealed class MainForm : Form
             Saturation = p.Saturation, HdrSdrWhite = _s.HdrSdrWhite, AllowHdrOutput = _s.AllowHdrOutput,
             ToneMap = p.ToneMap, Contrast = p.Contrast, BlackLevel = p.BlackLevel, Gamma = p.Gamma,
             Warmth = p.Warmth, Sharpness = p.Sharpness,
-            FrameGen = p.FrameGen, FrameGenQuality = p.FrameGenQuality, SharpUpscale = _s.SharpUpscale,
+            FrameGen = p.FrameGen, FrameGenQuality = p.FrameGenQuality, SharpUpscale = _s.SharpUpscale, MonitorGamut = _s.MonitorGamut,
         };
         _renderer.Invalidate();
     }
@@ -321,6 +321,25 @@ public sealed class MainForm : Form
         ApplyColor();
         Toast(factor < 2 ? "Frame generation off" : $"Frame generation {factor}x: a 30 fps game is shown at {30 * factor} fps");
         Changed();
+    }
+
+    /// <summary>One line on the monitor's colour range and whether the picture is being converted for it.</summary>
+    public string MonitorColorStatus
+    {
+        get
+        {
+            var r = _renderer;
+            if (r == null) return "";
+            string range = r.MonitorIsWideColor
+                ? $"wide color, {r.MonitorGamutRatio:0.00}x the standard range"
+                : $"standard color ({r.MonitorGamutRatio:0.00}x)";
+            string what = r.GamutCorrectionActive ? "Colors are converted for it."
+                : r.OutputIsHdr ? "Showing real HDR; Windows handles the colors."
+                : r.WindowsManagesColor ? "Windows manages its colors, so CaptureFix leaves them alone."
+                : r.MonitorIsWideColor ? "Correction is off, so colors look stronger and redder than intended."
+                : "No conversion needed.";
+            return $"{range}. {what}";
+        }
     }
 
     /// <summary>One line on what frame generation is doing right now.</summary>
@@ -695,6 +714,7 @@ public sealed class MainForm : Form
             lines.Add($"{p.Name}  ·  {cap.Mode}");
             lines.Add($"{_renderer.PresentFps:0.0} fps  ·  card to screen {_renderer.LatencyMs:0.0} ms (+ display)");
             lines.Add("Frame generation: " + FrameGenStatus);
+            lines.Add("Monitor: " + MonitorColorStatus);
             lines.Add($"Scaling {cap.Mode.Width}x{cap.Mode.Height} to {_renderer.ShownWidth}x{_renderer.ShownHeight}: {(_renderer.SharpScalingActive ? "sharp (bicubic)" : "plain")}");
             string hdrSrc = p.HdrMode == 0 ? "auto" : "set", rngSrc = p.RangeMode == 0 ? "auto" : "set";
             lines.Add($"Signal {(_renderer.EffectiveHdr ? "HDR10" : "SDR")} ({hdrSrc}), {(_renderer.EffectiveFullRange ? "full" : "limited")} range ({rngSrc}); black {_renderer.Signal.BlackCode}, white {_renderer.Signal.WhiteCode}  ·  output {(_renderer.OutputIsHdr ? "HDR (scRGB)" : "SDR")}{(_renderer.MonitorHdr ? ", monitor in HDR" : "")}");

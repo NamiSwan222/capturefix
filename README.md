@@ -142,6 +142,26 @@ instead of plain bilinear, for real and generated frames alike. Measured against
 picture at the same 1.33x factor: +1.3 dB on real GTA VI frames, +1.0 dB on a detailed photo, at
 0.04 ms a frame. `--scaletest` produces both versions of a saved frame.
 
+## Wide-colour monitors (why everything looked too red)
+
+A console picture is made for standard colours (BT.709 / sRGB). QD-OLED and many gaming monitors
+have deeper primaries, and unless Windows manages colour for them (HDR mode or Auto Color
+Management), the picture's numbers go straight to the panel: every colour gets stronger, reds and
+skin tones most of all. On the test PC the main monitor (a QD-OLED, red primary at 0.676, 0.316
+against the standard 0.640, 0.330) covers 1.35 times the standard colour range, and the game looked
+"too red" in SDR and HDR alike while the app's own output measured perfectly neutral.
+
+CaptureFix reads the primaries of the monitor its window is on (from DXGI, which gets them from
+the monitor's EDID), builds the BT.709-to-monitor matrix with the monitor's own white point (so
+white and greys do not move), and applies it in linear light at the end of the shader
+([MonitorGamut.cs](src/CaptureFix/Video/MonitorGamut.cs)). For that monitor, standard red is sent
+as 79% red plus 3% green. "Automatic" converts only when the monitor is clearly wide (over 1.12x)
+and Windows is not already managing its colour; it follows the window from monitor to monitor.
+Checked on the GPU against the same maths in Python: within 1/255, greys unchanged.
+
+If the monitor is switched to an sRGB mode in its own menu, set "Wide-color monitor" to Off, or the
+picture will come out too pale. `--monitors out.txt` lists every monitor's primaries and matrix.
+
 ## What a capture card viewer can and can't do with the GPU
 
 CaptureFix receives finished pictures from the console, not the game's 3D scene. So features that
@@ -178,7 +198,7 @@ a time.
 
 ## Settings (S)
 
-- **Picture:** frame generation (off / 2x / 3x / 4x) and its quality, sharp upscaling, signal (auto / HDR / SDR), brightness range (auto / limited / full), HDR colour style (Natural / Vivid), HDR brightness, HDR peak, contrast,
+- **Picture:** frame generation (off / 2x / 3x / 4x) and its quality, sharp upscaling, wide-colour monitor conversion, signal (auto / HDR / SDR), brightness range (auto / limited / full), HDR colour style (Natural / Vivid), HDR brightness, HDR peak, contrast,
   black level, colour, warmth, sharpness, gamma (2.2 / 2.4 dark room / 2.0 bright room), full range,
   real HDR on an HDR monitor.
 - **Sound:** output device, volume, mute, audio delay, restart audio.
@@ -248,6 +268,7 @@ after 4 seconds and quits.
 - `Video/Renderer.cs`: Direct3D 11 upload, draw, HDR output, screenshots, frame pacing.
 - `Video/FrameGen.cs`, `Shaders/framegen.hlsl`: frame generation.
 - `Video/SignalAnalyzer.cs`: HDR / range detection.
+- `Video/MonitorGamut.cs`: colour conversion for wide-colour monitors.
 - `Shaders/video.hlsl`: colour conversion and tone mapping.
 - `Audio/AudioBridge.cs`: game audio passthrough that follows the card's real rate.
 - `Updater.cs`: GitHub release check, verified download, silent install.

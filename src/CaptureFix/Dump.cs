@@ -5,6 +5,24 @@ namespace CaptureFix;
 /// <summary>"CaptureFix.exe --dump out.raw [mode-key]": saves one untouched frame from the card (for colour analysis).</summary>
 static class Dump
 {
+    /// <summary>"--monitors out.txt": every monitor's colour range and whether Windows manages its colour.</summary>
+    public static void Monitors(string[] a)
+    {
+        var sb = new System.Text.StringBuilder();
+        using var f = Vortice.DXGI.DXGI.CreateDXGIFactory2<Vortice.DXGI.IDXGIFactory6>(false);
+        for (uint i = 0; f.EnumAdapters1(i, out var ad).Success; i++)
+            for (uint o = 0; ad.EnumOutputs(o, out var outp).Success; o++)
+            {
+                using var o6 = outp.QueryInterface<Vortice.DXGI.IDXGIOutput6>();
+                var d = o6.Description1;
+                double ratio = MonitorGamut.AreaRatio(d.RedPrimary[0], d.RedPrimary[1], d.GreenPrimary[0], d.GreenPrimary[1], d.BluePrimary[0], d.BluePrimary[1]);
+                var m = MonitorGamut.Matrix709ToMonitor(d.RedPrimary[0], d.RedPrimary[1], d.GreenPrimary[0], d.GreenPrimary[1], d.BluePrimary[0], d.BluePrimary[1], d.WhitePoint[0], d.WhitePoint[1]);
+                sb.AppendLine(FormattableString.Invariant($"{d.DeviceName} {d.DesktopCoordinates.Right - d.DesktopCoordinates.Left}x{d.DesktopCoordinates.Bottom - d.DesktopCoordinates.Top}: red {d.RedPrimary[0]:0.000},{d.RedPrimary[1]:0.000} green {d.GreenPrimary[0]:0.000},{d.GreenPrimary[1]:0.000} blue {d.BluePrimary[0]:0.000},{d.BluePrimary[1]:0.000} white {d.WhitePoint[0]:0.0000},{d.WhitePoint[1]:0.0000} | colour range {ratio:0.00}x standard | Windows manages colour: {MonitorGamut.WindowsManagesColor(d.DeviceName)}"));
+                sb.AppendLine(FormattableString.Invariant($"     matrix: [{m[0]:0.0000} {m[1]:0.0000} {m[2]:0.0000}] [{m[3]:0.0000} {m[4]:0.0000} {m[5]:0.0000}] [{m[6]:0.0000} {m[7]:0.0000} {m[8]:0.0000}]"));
+            }
+        File.WriteAllText(a[0], sb.ToString());
+    }
+
     /// <summary>"--scaletest out.txt file.raw FORMAT W H PITCH outW outH pngPrefix": scales a frame with both scalers.</summary>
     public static void ScaleTest(string[] a)
     {
@@ -75,7 +93,7 @@ static class Dump
         {
             using var r = new Renderer(form.Handle);
             r.Resize(form.ClientSize.Width, form.ClientSize.Height);
-            r.Color = new ColorSettings { FrameGen = factor, HdrMode = 2, RangeMode = 1, SharpUpscale = sharp };
+            r.Color = new ColorSettings { FrameGen = factor, HdrMode = 2, RangeMode = 1, SharpUpscale = sharp, MonitorGamut = int.TryParse(Environment.GetEnvironmentVariable("CF_GAMUT"), out var gm) ? gm : 0 };
             using var cap = VideoCapture.StartSynthetic(new VideoMode(PixelFormat.NV12, 1920, 1080, 60, 1), frames, repeat);
             r.Source = cap;
             r.Start();
@@ -92,6 +110,7 @@ static class Dump
             sb.AppendLine($"time between pictures: mean {mean:0.00} ms, std {sd:0.00} ms, min {gaps.Min():0.00}, max {gaps.Max():0.00}; over 1.5x mean: {gaps.Count(g => g > mean * 1.5)}");
             sb.AppendLine("first pictures (alpha): " + string.Join(" ", log.Take(16).Select(x => x.alpha.ToString("0.##"))));
             sb.AppendLine($"shown at {r.ShownWidth}x{r.ShownHeight}, sharp scaling {(r.SharpScalingActive ? "on" : "off")}");
+            sb.AppendLine($"monitor colour range {r.MonitorGamutRatio:0.00}x ({r.MonitorPrimaries}), Windows manages colour: {r.WindowsManagesColor}, correction {(r.GamutCorrectionActive ? "ON" : "off")}");
             if (r.Error != null) sb.AppendLine("renderer error: " + r.Error);
             r.Source = null;
             File.WriteAllText(a[0], sb.ToString());
@@ -178,7 +197,7 @@ static class Dump
         _ = form.Handle;   // create the window without showing it
         using var r = new Renderer(form.Handle);
         r.Resize(960, 540);
-        r.Color = new ColorSettings();
+        r.Color = new ColorSettings { MonitorGamut = Environment.GetEnvironmentVariable("CF_GAMUT_PRIMARIES") != null ? 1 : 2 };
         r.RenderOnce(f, a[0]);
     }
 

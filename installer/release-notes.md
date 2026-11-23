@@ -1,12 +1,13 @@
-## CaptureFix 1.2.1
+## CaptureFix 1.2.2
 
-**Fixes wrong colours when the console changes its brightness range.**
+**Fixes "everything is too red" on wide-colour monitors.**
 
-- A PS5 can switch between limited (16-235) and full (0-255) range depending on its output mode.
-  The automatic detection now uses hard evidence (pixels beyond the limited range, or a pile-up
-  exactly on its limits) and gets cases right that it used to leave undecided.
-- If the range is forced in Settings and the console sends the other one, CaptureFix now says so
-  on screen. Press **R** to switch back to automatic.
-
-If colours look crushed or washed out, check Settings > Picture > Brightness range: "Detect
-automatically" is the right choice for almost everyone.
+- QD-OLED and many gaming monitors have deeper colours than a console picture is made for. Without
+  colour management the game looks oversaturated on them, reds and skin tones most of all, in SDR
+  and HDR alike. CaptureFix now reads the colours of the monitor its window is on and converts the
+  picture for it. White and greys stay exactly as they are.
+- It is automatic: on when the monitor is clearly wide-colour and Windows is not already managing
+  its colour, off otherwise, and it follows the window if you move it to another monitor.
+- Settings > Picture > Monitor colors shows what was detected and lets you force it on or off.
+  Turn it off if your monitor is set to an sRGB mode in its own menu.
+- F1 stats show the monitor's colour range and whether the conversion is active.

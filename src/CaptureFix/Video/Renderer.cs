@@ -28,6 +28,7 @@ public sealed class ColorSettings
     public int FrameGen;            // 0/1 = off, 2-4 = pictures shown per game frame
     public int FrameGenQuality = 1; // 0 = fast (quarter-size motion field), 1 = high (half-size)
     public bool SharpUpscale;       // bicubic instead of bilinear when the window is bigger than the picture
+    public int MonitorGamut;        // wide-colour monitor correction: 0 = automatic, 1 = on, 2 = off
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -38,7 +39,8 @@ struct ShaderParams
     public int TenBit;
     public float TexW, TexH, Saturation;
     public int ToneMap;
-    public float Contrast, BlackLevel, Gamma, Warmth, Sharpness, Pad0, Pad1, Pad2;
+    public float Contrast, BlackLevel, Gamma, Warmth, Sharpness, GamutOn, Pad1, Pad2;
+    public float G00, G01, G02, G03, G10, G11, G12, G13, G20, G21, G22, G23;
 }
 
 /// <summary>
@@ -352,9 +354,68 @@ public sealed class Renderer : IDisposable
             catch { }
             _monitorHdr = hdr;
             _refreshHz = Displays.RefreshHz(_hwnd);
+            UpdateMonitorGamut();
         }
         if (_swap == null || WantHdrSwap() != _hdrSwap) { _resize = true; }
     }
+
+    // ---------- wide-colour monitor ----------
+
+    float[] _gamut = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    bool _gamutKnown, _windowsManaged;
+    string _gamutKey = "";
+
+    /// <summary>How much bigger the monitor's colour range is than the standard one (1.0 = standard).</summary>
+    public double MonitorGamutRatio { get; private set; } = 1;
+    /// <summary>Windows itself converts colours for this monitor (HDR or Auto Color Management).</summary>
+    public bool WindowsManagesColor => _windowsManaged;
+    public bool MonitorIsWideColor => _gamutKnown && MonitorGamutRatio > 1.12;
+    /// <summary>The picture is being converted to the monitor's own primaries right now.</summary>
+    public bool GamutCorrectionActive => _gamutKnown && !_hdrSwap && Color.MonitorGamut switch
+    {
+        1 => true,
+        2 => false,
+        _ => MonitorIsWideColor && !_windowsManaged,
+    };
+
+    void UpdateMonitorGamut()
+    {
+        try
+        {
+            double rx, ry, gx, gy, bx, by, wx, wy; string device;
+            var forced = Environment.GetEnvironmentVariable("CF_GAMUT_PRIMARIES");   // tests: "rx,ry,gx,gy,bx,by,wx,wy"
+            if (forced != null)
+            {
+                var v = forced.Split(',').Select(x => double.Parse(x, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                (rx, ry, gx, gy, bx, by, wx, wy) = (v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]); device = "forced";
+            }
+            else
+            {
+                if (_swap == null) return;
+                using var output = _swap.GetContainingOutput();
+                using var o6 = output.QueryInterface<IDXGIOutput6>();
+                var d = o6.Description1;
+                (rx, ry, gx, gy, bx, by, wx, wy) = (d.RedPrimary[0], d.RedPrimary[1], d.GreenPrimary[0], d.GreenPrimary[1], d.BluePrimary[0], d.BluePrimary[1], d.WhitePoint[0], d.WhitePoint[1]);
+                device = d.DeviceName;
+            }
+            string key = FormattableString.Invariant($"{device}|{rx:0.0000},{ry:0.0000},{gx:0.0000},{gy:0.0000},{bx:0.0000},{by:0.0000},{wx:0.0000},{wy:0.0000}");
+            bool managed = forced == null && MonitorGamut.WindowsManagesColor(device);
+            if (key == _gamutKey && managed == _windowsManaged) return;
+            _gamutKey = key; _windowsManaged = managed;
+            _gamutKnown = MonitorGamut.PlausiblePrimaries(rx, ry, gx, gy, bx, by, wx, wy);
+            if (_gamutKnown)
+            {
+                _gamut = MonitorGamut.Matrix709ToMonitor(rx, ry, gx, gy, bx, by, wx, wy);
+                MonitorGamutRatio = MonitorGamut.AreaRatio(rx, ry, gx, gy, bx, by);
+            }
+            else MonitorGamutRatio = 1;
+            MonitorPrimaries = FormattableString.Invariant($"red {rx:0.000},{ry:0.000}  green {gx:0.000},{gy:0.000}  blue {bx:0.000},{by:0.000}");
+            _dirty = true;
+        }
+        catch { }
+    }
+
+    public string MonitorPrimaries { get; private set; } = "";
 
     void ResizeSwapChain()
     {
@@ -483,6 +544,10 @@ public sealed class Renderer : IDisposable
             TexW = _texW, TexH = _texH, Saturation = c.Saturation,
             ToneMap = c.ToneMap, Contrast = c.Contrast, BlackLevel = c.BlackLevel, Gamma = c.Gamma,
             Warmth = c.Warmth, Sharpness = _texFormat == PixelFormat.YUY2 ? 0 : c.Sharpness,
+            GamutOn = GamutCorrectionActive ? 1 : 0,
+            G00 = _gamut[0], G01 = _gamut[1], G02 = _gamut[2],
+            G10 = _gamut[3], G11 = _gamut[4], G12 = _gamut[5],
+            G20 = _gamut[6], G21 = _gamut[7], G22 = _gamut[8],
         };
         _ctx.UpdateSubresource(in p, _cbuffer);
 
@@ -607,6 +672,7 @@ public sealed class Renderer : IDisposable
         for (int i = 0; i < 150; i++) Signal.Analyze(f, force: true);
         UpdateOutputMode();
         ResizeSwapChain(); _resize = false;
+        UpdateMonitorGamut();
         Upload(f);
         _snapshotSync = true;
         _snapshotPath = pngPath;   // Draw saves it just before presenting
