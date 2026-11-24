@@ -14,6 +14,9 @@ public sealed class MainForm : Form
         Font = new Font("Segoe UI", 10f), Padding = new Padding(10, 6, 10, 6), Location = new Point(12, 12), Visible = false,
     };
     readonly ContextMenuStrip _menu = new();
+    readonly ControlBar _bar;
+    readonly BarButton _pill = new() { Glyph = Ui.GlyphUp, Pill = true, Visible = false };
+    Point _lastCursor;
     readonly System.Windows.Forms.Timer _tick = new() { Interval = 250 };
     readonly AudioBridge _audio = new();
 
@@ -54,7 +57,18 @@ public sealed class MainForm : Form
 
         Controls.Add(_overlay);
         Controls.Add(_video);
+        // The control bar sits under the picture (docked first, so the picture fills the rest).
+        _bar = new ControlBar(this) { Dock = DockStyle.Bottom, Visible = !_s.BarMinimized };
+        _bar.Height = _bar.BarHeight;
+        Controls.Add(_bar);
+        _pill.Set("Controls");
+        _pill.Click += (_, _) => SetBarMinimized(false);
+        Controls.Add(_pill);
         _overlay.BringToFront();
+        _pill.BringToFront();
+        _bar.ContextMenuStrip = _menu;
+        Ui.Style(_menu);
+        _lastMouseMove = Environment.TickCount64;
 
         _video.ContextMenuStrip = _menu;
         _overlay.ContextMenuStrip = _menu;
@@ -68,6 +82,7 @@ public sealed class MainForm : Form
             _lastMousePos = e.Location;
             _lastMouseMove = Environment.TickCount64;
             if (_cursorHidden) { Cursor.Show(); _cursorHidden = false; }
+            UpdateBar();
         };
 
         if (_s.Bounds is { Length: 4 } b)
@@ -224,6 +239,7 @@ public sealed class MainForm : Form
             ToneMap = p.ToneMap, Contrast = p.Contrast, BlackLevel = p.BlackLevel, Gamma = p.Gamma,
             Warmth = p.Warmth, Sharpness = p.Sharpness,
             FrameGen = p.FrameGen, FrameGenQuality = p.FrameGenQuality, SharpUpscale = _s.SharpUpscale, MonitorGamut = _s.MonitorGamut,
+            Deband = p.Deband, Clarity = p.Clarity, Vibrance = p.Vibrance,
         };
         _renderer.Invalidate();
     }
@@ -307,6 +323,151 @@ public sealed class MainForm : Form
         _ = StartCaptureAsync();
     }
 
+    // ---------- picture modes ----------
+
+    public static readonly string[] PresetNames = { "Original", "Balanced", "Ultra" };
+    public static readonly string[] PresetHints = { "exactly what the console sends", "a little sharper and cleaner", "sharpest picture, smoothest motion" };
+    static readonly (float sharp, float deband, float clarity)[] Presets = { (0f, 0f, 0f), (0.35f, 0.6f, 0.12f), (0.6f, 1f, 0.25f) };
+
+    /// <summary>Which picture mode the enhancer sliders match right now, or -1 for the user's own mix.</summary>
+    public int CurrentPreset
+    {
+        get
+        {
+            var p = _s.Active;
+            static bool Near(float a, float b) => Math.Abs(a - b) < 0.006f;
+            for (int i = 0; i < Presets.Length; i++)
+                if (Near(p.Sharpness, Presets[i].sharp) && Near(p.Deband, Presets[i].deband) && Near(p.Clarity, Presets[i].clarity) && Near(p.Vibrance, 0))
+                    return i;
+            return -1;
+        }
+    }
+
+    public void SetPreset(int i)
+    {
+        var p = _s.Active;
+        (p.Sharpness, p.Deband, p.Clarity) = Presets[i];
+        p.Vibrance = 0;
+        if (i == 2)
+        {
+            // Ultra also turns on everything else that improves the picture.
+            _s.SharpUpscale = true;
+            p.FrameGenQuality = 1;
+            if (p.FrameGen < 2) p.FrameGen = 2;
+        }
+        _s.Save();
+        ApplyColor();
+        Toast(i switch
+        {
+            0 => "Picture: Original. Nothing is added to what the console sends.",
+            1 => "Picture: Balanced. Light sharpening and smoother skies.",
+            _ => $"Picture: Ultra. Sharp upscaling, adaptive sharpening, smooth gradients, extra clarity, frame generation {p.FrameGen}x.",
+        });
+        Changed();
+    }
+
+    // ---------- what the control bar shows ----------
+
+    public bool IsFullscreen => FormBorderStyle == FormBorderStyle.None;
+    public bool EffectivelyMuted => _s.Muted || _audio.SessionMuted;
+    public string MotionLabel => _s.Active.FrameGen < 2 ? "Off" : $"{_s.Active.FrameGen}x";
+    public bool MotionActive => _renderer?.FrameGenFactor >= 2;
+    public string SignalLabel => _s.Active.HdrMode switch
+    {
+        0 => _renderer == null || _capture == null ? "Auto" : _renderer.EffectiveHdr ? "Auto (HDR)" : "Auto (SDR)",
+        1 => "HDR10",
+        _ => "SDR",
+    };
+
+    public string BarStatus
+    {
+        get
+        {
+            var cap = _capture; var r = _renderer;
+            if (cap == null || r == null) return _starting ? "Connecting…" : "No capture card";
+            long last = Math.Max(cap.LastFrameTicks, cap.StartedTicks);
+            if ((Stopwatch.GetTimestamp() - last) / (double)Stopwatch.Frequency > 2) return "No signal";
+            string s = $"{cap.Mode.Width}x{cap.Mode.Height}";
+            if (r.ShownWidth > cap.Mode.Width * 1.02) s += $" → {r.ShownWidth}x{r.ShownHeight}";
+            if (r.FrameGenFactor >= 2) s += $"   ·   {r.GameFps:0} → {r.PresentFps:0} fps";
+            else if (r.GameFps >= 1) s += $"   ·   {r.GameFps:0} fps";
+            return s;
+        }
+    }
+
+    public void SetSignal(int mode)
+    {
+        _s.Active.HdrMode = mode;
+        _s.Save();
+        ApplyColor();
+        Toast(mode switch { 0 => "Signal: detected automatically", 1 => "Signal: always HDR10", _ => "Signal: always SDR" });
+        Changed();
+    }
+
+    public void SetVolume(float v, bool save)
+    {
+        _s.Active.Volume = v;
+        ApplyAudioLevels();
+        if (save) { _s.Save(); Changed(); }
+    }
+
+    public void ShowFullMenu(Control anchor) => _menu.Show(anchor, new Point(anchor.Width, 2), ToolStripDropDownDirection.AboveLeft);
+
+    /// <summary>Tab or the bar's arrow: hide the control bar (a small tab comes back with the mouse) or show it.</summary>
+    public void SetBarMinimized(bool minimized)
+    {
+        _s.BarMinimized = minimized;
+        _s.Save();
+        _lastMouseMove = Environment.TickCount64;
+        UpdateBar();
+        if (minimized) Toast("Controls hidden. Move the mouse and click \"Controls\", or press Tab, to bring them back.");
+    }
+
+    /// <summary>
+    /// Windowed: the bar sits under the picture. Full screen: it lies over the bottom of the picture
+    /// and goes away when the mouse rests. Minimized: only a small tab, and only while the mouse moves.
+    /// </summary>
+    void UpdateBar()
+    {
+        long now = Environment.TickCount64;
+        bool recent = now - _lastMouseMove < 3000;
+        var cp = PointToClient(Cursor.Position);
+        float f = DeviceDpi / 96f;
+        int bh = _bar.BarHeight;
+        if (_s.BarMinimized)
+        {
+            if (_bar.Visible) _bar.Visible = false;
+            int w = _pill.PreferredWidth() + (int)(8 * f), h = (int)(30 * f);
+            var r = new Rectangle((ClientSize.Width - w) / 2, ClientSize.Height - h - (int)(12 * f), w, h);
+            if (_pill.Bounds != r)
+            {
+                _pill.Bounds = r;
+                using var path = Ui.Rounded(new RectangleF(0, 0, w, h), h / 2f);
+                _pill.Region = new Region(path);
+            }
+            bool showPill = recent || (_pill.Visible && r.Contains(cp));
+            if (_pill.Visible != showPill) { _pill.Visible = showPill; if (showPill) _pill.BringToFront(); }
+            return;
+        }
+        if (_pill.Visible) _pill.Visible = false;
+        if (!IsFullscreen)
+        {
+            if (_bar.Dock != DockStyle.Bottom || _bar.Height != bh || !_bar.Visible)
+            {
+                _bar.Height = bh;
+                _bar.Dock = DockStyle.Bottom;
+                _bar.Visible = true;
+                _bar.SendToBack();
+            }
+            return;
+        }
+        if (_bar.Dock != DockStyle.None) _bar.Dock = DockStyle.None;
+        var strip = new Rectangle(0, ClientSize.Height - bh, ClientSize.Width, bh);
+        if (_bar.Bounds != strip) _bar.Bounds = strip;
+        bool show = recent || _bar.MenuOpen || _menu.Visible || (_bar.Visible && strip.Contains(cp));
+        if (_bar.Visible != show) { _bar.Visible = show; if (show) _bar.BringToFront(); }
+    }
+
     /// <summary>G cycles frame generation: off, 2x, 3x, 4x.</summary>
     void CycleFrameGen()
     {
@@ -387,7 +548,7 @@ public sealed class MainForm : Form
         Changed();
     }
 
-    void ToggleMute()
+    public void ToggleMute()
     {
         // Muted from outside (volume mixer etc.): M turns the sound back on instead of muting more.
         if (!_s.Muted && _audio.SessionMuted)
@@ -418,6 +579,8 @@ public sealed class MainForm : Form
             FormBorderStyle = FormBorderStyle.Sizable;
             if (!_windowedBounds.IsEmpty) Bounds = _windowedBounds;
         }
+        _lastMouseMove = Environment.TickCount64;
+        UpdateBar();
         _s.Save();
     }
 
@@ -600,6 +763,7 @@ public sealed class MainForm : Form
         _menu.Items.Add(new ToolStripMenuItem("Full screen", null, (_, _) => ToggleFullscreen()) { Checked = FormBorderStyle == FormBorderStyle.None, ShortcutKeyDisplayString = "F11" });
         _menu.Items.Add(new ToolStripMenuItem("Screenshot", null, (_, _) => Screenshot()) { ShortcutKeyDisplayString = "F12" });
         _menu.Items.Add(new ToolStripMenuItem("Always on top", null, (_, _) => { _s.AlwaysOnTop = !_s.AlwaysOnTop; TopMost = _s.AlwaysOnTop; _s.Save(); }) { Checked = _s.AlwaysOnTop });
+        _menu.Items.Add(new ToolStripMenuItem("Show the control bar", null, (_, _) => SetBarMinimized(!_s.BarMinimized)) { Checked = !_s.BarMinimized, ShortcutKeyDisplayString = "Tab" });
         _menu.Items.Add(new ToolStripMenuItem("Show stats", null, (_, _) => { _s.ShowStats = !_s.ShowStats; _s.Save(); Changed(); }) { Checked = _s.ShowStats, ShortcutKeyDisplayString = "F1" });
 
         var devs = new ToolStripMenuItem("Capture device");
@@ -639,6 +803,7 @@ public sealed class MainForm : Form
             case Keys.F1: _s.ShowStats = !_s.ShowStats; _s.Save(); Changed(); return true;
             case Keys.F5: _ = StartCaptureAsync(); return true;
             case Keys.F12: Screenshot(); return true;
+            case Keys.Tab: SetBarMinimized(!_s.BarMinimized); return true;
         }
         if (keyData is >= Keys.D1 and <= Keys.D9)
         {
@@ -658,9 +823,20 @@ public sealed class MainForm : Form
         long now = Environment.TickCount64;
         if (_retryAt != 0 && now >= _retryAt && !_starting) { _retryAt = 0; _ = StartCaptureAsync(); }
 
+        // Mouse movement anywhere over the window brings the controls back.
+        var cursor = Cursor.Position;
+        if (cursor != _lastCursor)
+        {
+            _lastCursor = cursor;
+            if (Bounds.Contains(cursor)) _lastMouseMove = now;
+        }
+        UpdateBar();
+        if (_bar.Visible) _bar.Sync();
+
         // Hide the mouse pointer over the picture in full screen once it stops moving.
         bool full = FormBorderStyle == FormBorderStyle.None;
-        if (full && _s.HideCursor && !_cursorHidden && now - _lastMouseMove > 2500 && ContainsFocus && !_menu.Visible
+        bool overControls = (_bar.Visible && _bar.Bounds.Contains(PointToClient(cursor))) || (_pill.Visible && _pill.Bounds.Contains(PointToClient(cursor))) || _bar.MenuOpen;
+        if (full && _s.HideCursor && !_cursorHidden && !overControls && now - _lastMouseMove > 3000 && ContainsFocus && !_menu.Visible
             && _video.ClientRectangle.Contains(_video.PointToClient(Cursor.Position)))
         { Cursor.Hide(); _cursorHidden = true; }
         else if (_cursorHidden && (!full || !ContainsFocus || _menu.Visible))

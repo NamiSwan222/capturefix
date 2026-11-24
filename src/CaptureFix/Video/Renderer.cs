@@ -29,6 +29,9 @@ public sealed class ColorSettings
     public int FrameGenQuality = 1; // 0 = fast (quarter-size motion field), 1 = high (half-size)
     public bool SharpUpscale;       // bicubic instead of bilinear when the window is bigger than the picture
     public int MonitorGamut;        // wide-colour monitor correction: 0 = automatic, 1 = on, 2 = off
+    public float Deband;            // 0..1: smooths colour steps in skies and fog
+    public float Clarity;           // 0..1: local contrast
+    public float Vibrance;          // 0..1: lifts weak colours, leaves strong ones alone
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -200,12 +203,12 @@ public sealed class Renderer : IDisposable
                 {
                     Signal.Analyze(frame);
                     int want = Color.FrameGen;
-                    _fg.SharpUpscale = Color.SharpUpscale;
+                    SyncEnhancers();
                     if (want < 2)
                     {
                         if (_fgShowing) ResetFrameGen();
                         Upload(frame);
-                        if (UpscalingNow()) { PushToFrameGen(); PresentGenerated(1f); }   // convert at game size, then scale sharply
+                        if (UpscalingNow() || _fg.Enhancing) { PushToFrameGen(); PresentGenerated(1f); }   // convert at game size, then scale and enhance
                         else Draw();
                         drew = true;
                         latencyAcc += (Stopwatch.GetTimestamp() - frame.ArrivedTicks) * 1000.0 / Stopwatch.Frequency;
@@ -299,11 +302,24 @@ public sealed class Renderer : IDisposable
     bool UpscalingNow() => Color.SharpUpscale && _haveFrame && _texW > 0 && Letterbox().Width > _texW * 1.02f;
 
     /// <summary>Shows the newest frame again with the current settings (picture standing still).</summary>
+    void SyncEnhancers()
+    {
+        var c = Color;
+        _fg.SharpUpscale = c.SharpUpscale;
+        _fg.Sharp = Math.Clamp(c.Sharpness, 0, 1); _fg.Deband = Math.Clamp(c.Deband, 0, 1);
+        _fg.Clarity = Math.Clamp(c.Clarity, 0, 1); _fg.Vibrance = Math.Clamp(c.Vibrance, 0, 1);
+    }
+
+    /// <summary>Any of the picture enhancers is on.</summary>
+    public bool EnhancersActive => _fg.Enhancing;
+
     void Redraw()
     {
-        _fg.SharpUpscale = Color.SharpUpscale;
+        SyncEnhancers();
+        if (_haveFrame && _srvY != null && _fg.Enhancing && !(_fg.HasFrame && _fg.Width == _texW && _fg.Height == _texH))
+            PushToFrameGen();
         bool viaFrameGen = _haveFrame && _srvY != null && _fg.HasFrame && _fg.Width == _texW && _fg.Height == _texH
-                           && (_fgShowing || UpscalingNow());
+                           && (_fgShowing || UpscalingNow() || _fg.Enhancing);
         if (!viaFrameGen) { Draw(); return; }
         _fg.HdrOut = _hdrSwap;
         DrawSource(_fg.NewestRtv, new Viewport(0, 0, _texW, _texH));
@@ -543,7 +559,7 @@ public sealed class Renderer : IDisposable
             TenBit = _texFormat == PixelFormat.P010 ? 1 : 0,
             TexW = _texW, TexH = _texH, Saturation = c.Saturation,
             ToneMap = c.ToneMap, Contrast = c.Contrast, BlackLevel = c.BlackLevel, Gamma = c.Gamma,
-            Warmth = c.Warmth, Sharpness = _texFormat == PixelFormat.YUY2 ? 0 : c.Sharpness,
+            Warmth = c.Warmth, Sharpness = 0,   // sharpening now happens at the on-screen size (PSEnhance)
             GamutOn = GamutCorrectionActive ? 1 : 0,
             G00 = _gamut[0], G01 = _gamut[1], G02 = _gamut[2],
             G10 = _gamut[3], G11 = _gamut[4], G12 = _gamut[5],
@@ -663,7 +679,14 @@ public sealed class Renderer : IDisposable
         Upload(f); PushToFrameGen();
         SavePng(outPrefix + "_bilinear.png", _fg.ReadScaled(w, h, false), w, h);
         SavePng(outPrefix + "_sharp.png", _fg.ReadScaled(w, h, true), w, h);
-        return $"bilinear {_fg.BenchmarkScale(w, h, false):0.000} ms, sharp {_fg.BenchmarkScale(w, h, true):0.000} ms";
+        string res = $"bilinear {_fg.BenchmarkScale(w, h, false):0.000} ms, sharp {_fg.BenchmarkScale(w, h, true):0.000} ms";
+        SyncEnhancers();
+        if (_fg.Enhancing)
+        {
+            SavePng(outPrefix + "_enhanced.png", _fg.ReadScaled(w, h, true), w, h);
+            res += $", sharp + enhancers {_fg.BenchmarkScale(w, h, true):0.000} ms";
+        }
+        return res;
     }
 
     /// <summary>Testing: draws one frame without the render thread and saves exactly what would be shown.</summary>

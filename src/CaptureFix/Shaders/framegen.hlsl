@@ -258,3 +258,84 @@ float4 PSInterp(VSOut i) : SV_Target
     // bit-identical between frames; a moving picture almost never is.
     return float4(lerp(moved, lerp(sp, sc, Alpha), still), 1);
 }
+
+// ---------- picture enhancers (last pass, at the size shown on screen) ----------
+//
+// T0 = the picture already scaled to its on-screen size (with mips when Clarity is on).
+// The cbuffer is reused: Texel = one output pixel in UV, Alpha = sharpening (0..1),
+// Smooth = debanding (0..1), StaticBias = clarity (0..1), EdgeCost = vibrance (0..1),
+// Refine = output height / 1080 (so radii cover the same part of the picture at any size),
+// Lod = mip level used as the blurred picture for clarity.
+//
+// Sharpening is contrast adaptive (the same idea as AMD CAS, the sharpening stage of FSR):
+// flat and already-contrasty areas are left alone, so it does not add halos or noise.
+// Debanding smooths the visible steps in skies and fog that 8-bit video leaves behind, and only
+// touches areas that are nearly flat already. Clarity lifts local contrast in the midtones.
+
+float3 Enc(float3 c) { return HdrOut > 0.5 ? pow(max(c, 0) / 12.5, 1.0 / 2.2) : c; }
+float3 Dec(float3 c) { return HdrOut > 0.5 ? pow(max(c, 0), 2.2) * 12.5 : saturate(c); }
+float3 Tap(float2 uv) { return Enc(T0.SampleLevel(Linear, uv, 0).rgb); }
+float Hash(float2 p)
+{
+    float3 p3 = frac(float3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.x + p3.y) * p3.z);
+}
+float Max3(float3 v) { return max(v.r, max(v.g, v.b)); }
+
+float4 PSEnhance(VSOut i) : SV_Target
+{
+    float sharp = Alpha, deband = Smooth, clarity = StaticBias, vib = EdgeCost;
+    static const float3 LW = float3(0.2126, 0.7152, 0.0722);
+    float3 c = Tap(i.uv);
+    float3 o = c;
+
+    if (deband > 0)
+    {
+        float2 px = floor(i.pos.xy);
+        bool changed = false;
+        for (int k = 1; k <= 2; k++)
+        {
+            float ang = Hash(px + k * 17.0) * 6.2831853;
+            float dist = (0.35 + 0.65 * Hash(px.yx + k * 31.0)) * 10.0 * k * Refine;
+            float2 dir = float2(cos(ang), sin(ang)) * dist;
+            float2 d = dir * Texel, e = float2(-dir.y, dir.x) * Texel;
+            float3 s0 = Tap(i.uv + d), s1 = Tap(i.uv - d), s2 = Tap(i.uv + e), s3 = Tap(i.uv - e);
+            float3 avg = (s0 + s1 + s2 + s3) * 0.25;
+            float spread = Max3(max(max(abs(s0 - o), abs(s1 - o)), max(abs(s2 - o), abs(s3 - o))));
+            float thr = lerp(0.004, 0.011, deband) / k;
+            if (spread < thr * 2.0 && Max3(abs(avg - o)) < thr) { o = avg; changed = true; }
+        }
+        // A little noise where a gradient was smoothed, so the 8-bit output does not band again.
+        if (changed) o += (Hash(px + 91.7) + Hash(px + 13.3) - 1.0) * (0.7 / 255.0);
+    }
+
+    if (sharp > 0)
+    {
+        float3 a = Tap(i.uv - float2(0, Texel.y)), b = Tap(i.uv - float2(Texel.x, 0));
+        float3 d = Tap(i.uv + float2(Texel.x, 0)), e = Tap(i.uv + float2(0, Texel.y));
+        float3 mn = min(c, min(min(a, b), min(d, e))), mx = max(c, max(max(a, b), max(d, e)));
+        float3 amp = sqrt(saturate(min(mn, 1.0 - mx) / max(mx, 1e-4)));
+        float3 w = amp * -lerp(0.0, 0.2, sharp);
+        o += (c + (a + b + d + e) * w) / (1.0 + 4.0 * w) - c;
+    }
+
+    if (clarity > 0)
+    {
+        float2 t = Texel * exp2(Lod) * 0.75;
+        float3 bl = Enc(T0.SampleLevel(Linear, i.uv + float2(t.x, t.y), Lod).rgb) + Enc(T0.SampleLevel(Linear, i.uv + float2(-t.x, t.y), Lod).rgb)
+                  + Enc(T0.SampleLevel(Linear, i.uv + float2(t.x, -t.y), Lod).rgb) + Enc(T0.SampleLevel(Linear, i.uv - float2(t.x, t.y), Lod).rgb);
+        float L = dot(o, LW), B = dot(bl, LW) * 0.25;
+        float m = 2.0 * saturate(L) - 1.0;
+        float dl = clamp(L - B, -0.12, 0.12) * clarity * (1.0 - m * m);
+        o *= (max(L, 0.02) + dl) / max(L, 0.02);
+    }
+
+    if (vib > 0)
+    {
+        float L = dot(o, LW);
+        float sat = Max3(o) - min(o.r, min(o.g, o.b));
+        o = L + (o - L) * (1.0 + vib * 0.6 * (1.0 - saturate(sat * 1.5)));
+    }
+    return float4(Dec(o), 1);
+}

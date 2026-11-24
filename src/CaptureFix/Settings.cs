@@ -20,7 +20,10 @@ public sealed class Profile
     public float BlackLevel { get; set; }
     public float Gamma { get; set; } = 2.2f;
     public float Warmth { get; set; }
-    public float Sharpness { get; set; }
+    public float Sharpness { get; set; } = 0.35f;  // adaptive sharpening, 0..1
+    public float Deband { get; set; } = 0.6f;      // smooths colour steps in skies and fog, 0..1
+    public float Clarity { get; set; } = 0.12f;    // local contrast, 0..1
+    public float Vibrance { get; set; }            // lifts weak colours, 0..1
     public int FrameGen { get; set; } = 2;         // pictures shown per game frame: 0 = off, 2, 3, 4
     public int FrameGenQuality { get; set; } = 1;  // 0 = fast, 1 = high
     public int AudioDelayMs { get; set; } = 50;
@@ -44,6 +47,7 @@ public sealed class AppSettings
     public bool StartFullscreen { get; set; }
     public bool ShowTips { get; set; } = true;
     public bool SharpUpscale { get; set; } = true;
+    public bool BarMinimized { get; set; }          // the on-screen control bar is hidden until the mouse moves
     public int MonitorGamut { get; set; }           // wide-colour monitor correction: 0 = automatic, 1 = on, 2 = off
     public bool AutoUpdate { get; set; } = true;
     public string? ScreenshotDir { get; set; }

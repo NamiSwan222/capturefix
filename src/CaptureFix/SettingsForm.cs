@@ -108,6 +108,19 @@ public sealed class SettingsForm : Form
         Check(page, "Sharp upscaling", "When the window is bigger than the game picture (1080p on a 1440p or 4K screen), scale it up with a sharper filter. Edges and text come out crisper.",
             () => _s.SharpUpscale, v => { _s.SharpUpscale = v; ApplyPicture(); });
 
+        Section(page, "Picture mode");
+        Choice(page, "Mode", new[] { "Original  (exactly what the console sends)", "Balanced  (a little sharper and cleaner)", "Ultra  (sharpest picture, smoothest motion)", "Custom  (your own slider values)" },
+            "One click for the four sliders below. Ultra also turns on sharp upscaling and frame generation. None of this changes the colors.",
+            () => _main.CurrentPreset is >= 0 and var i ? i : 3, v => { if (v < 3) { _main.SetPreset(v); LoadValues(); } });
+        Slider(page, "Sharpening", 0, 100, () => (int)Math.Round(P.Sharpness * 100), v => { P.Sharpness = v / 100f; ApplyPicture(); }, v => v == 0 ? "off" : $"{v}%",
+            "Brings out fine detail and text. It adapts to the picture, so edges do not get halos.");
+        Slider(page, "Smooth gradients", 0, 100, () => (int)Math.Round(P.Deband * 100), v => { P.Deband = v / 100f; ApplyPicture(); }, v => v == 0 ? "off" : $"{v}%",
+            "Removes the visible steps (banding) in skies, fog and dark scenes.");
+        Slider(page, "Clarity", 0, 100, () => (int)Math.Round(P.Clarity * 100), v => { P.Clarity = v / 100f; ApplyPicture(); }, v => v == 0 ? "off" : $"{v}%",
+            "More depth and punch in the midtones.");
+        Slider(page, "Vibrance", 0, 100, () => (int)Math.Round(P.Vibrance * 100), v => { P.Vibrance = v / 100f; ApplyPicture(); }, v => v == 0 ? "off" : $"{v}%",
+            "Lifts dull colors without overdoing strong ones. Off in every mode above.");
+
         Section(page, "HDR");
         Choice(page, "Signal", new[] { "Detect automatically (recommended)", "Always HDR10", "Always SDR" },
             "CaptureFix reads the picture to tell HDR from SDR. Only force it if detection gets it wrong. Hotkey: H cycles the choices.",
@@ -130,7 +143,6 @@ public sealed class SettingsForm : Form
         Slider(page, "Color", 0, 200, () => (int)Math.Round(P.Saturation * 100), v => { P.Saturation = v / 100f; ApplyPicture(); }, v => $"{v}%", "100% = what the console sends.");
         Slider(page, "Warmth", -100, 100, () => (int)Math.Round(P.Warmth * 100), v => { P.Warmth = v / 100f; ApplyPicture(); },
             v => v == 0 ? "0" : v > 0 ? $"warm {v}" : $"cool {-v}", null);
-        Slider(page, "Sharpness", 0, 100, () => (int)Math.Round(P.Sharpness * 100), v => { P.Sharpness = v / 100f; ApplyPicture(); }, v => $"{v}%", "Crisper text and edges. Useful when the window is bigger than the video.");
         Choice(page, "Gamma", new[] { "2.2  (normal)", "2.4  (dark room)", "2.0  (bright room)" }, null,
             () => P.Gamma >= 2.3f ? 1 : P.Gamma <= 2.1f ? 2 : 0, v => { P.Gamma = v == 1 ? 2.4f : v == 2 ? 2.0f : 2.2f; ApplyPicture(); });
 
@@ -155,7 +167,7 @@ public sealed class SettingsForm : Form
         {
             var d = new Profile();
             P.SdrPeakNits = d.SdrPeakNits; P.PeakNits = d.PeakNits; P.Saturation = d.Saturation; P.ToneMap = d.ToneMap;
-            P.Contrast = d.Contrast; P.BlackLevel = d.BlackLevel; P.Gamma = d.Gamma; P.Warmth = d.Warmth; P.Sharpness = d.Sharpness;
+            P.Contrast = d.Contrast; P.BlackLevel = d.BlackLevel; P.Gamma = d.Gamma; P.Warmth = d.Warmth; P.Sharpness = d.Sharpness; P.Deband = d.Deband; P.Clarity = d.Clarity; P.Vibrance = d.Vibrance;
             ApplyPicture(); LoadValues();
         }));
         return page;
@@ -299,7 +311,8 @@ public sealed class SettingsForm : Form
             ("F1", "Stats"),
             ("F12", "Screenshot"),
             ("F5", "Reconnect the capture card"),
-            ("Right-click", "Quick menu"),
+            ("Tab", "Hide or show the control bar"),
+            ("Right-click", "Full menu"),
         };
         var grid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
         foreach (var (k, d) in keys)

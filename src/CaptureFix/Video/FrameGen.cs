@@ -29,7 +29,7 @@ public sealed class FrameGen : IDisposable
     readonly ID3D11Device _device;
     readonly ID3D11DeviceContext _ctx;
     readonly ID3D11VertexShader _vs;
-    readonly ID3D11PixelShader _psLuma, _psMotion, _psMedian, _psInterp, _psBlit, _psScale;
+    readonly ID3D11PixelShader _psLuma, _psMotion, _psMedian, _psInterp, _psBlit, _psScale, _psEnhance;
     readonly ID3D11SamplerState _sampler;
     readonly ID3D11Buffer _cb;
 
@@ -68,6 +68,13 @@ public sealed class FrameGen : IDisposable
     public bool SharpUpscale { get; set; }
     /// <summary>How much of the bicubic overshoot (halos) to remove: 0 = none, 1 = all.</summary>
     public float AntiRing { get; set; } = 0.8f;
+    // Picture enhancers, applied last at the size shown on screen (see PSEnhance). All 0..1, 0 = off.
+    public float Sharp { get; set; }
+    public float Deband { get; set; }
+    public float Clarity { get; set; }
+    public float Vibrance { get; set; }
+    public bool Enhancing => Sharp > 0 || Deband > 0 || Clarity > 0 || Vibrance > 0;
+    Target? _scaled;                            // the picture at its on-screen size, before enhancing
     public bool HasFrame => _frames >= 1;
 
     public bool HasPair => _frames >= 2;
@@ -100,6 +107,7 @@ public sealed class FrameGen : IDisposable
         _psInterp = device.CreatePixelShader(C("PSInterp", "ps_5_0").Span);
         _psBlit = device.CreatePixelShader(C("PSBlit", "ps_5_0").Span);
         _psScale = device.CreatePixelShader(C("PSScale", "ps_5_0").Span);
+        _psEnhance = device.CreatePixelShader(C("PSEnhance", "ps_5_0").Span);
         _cb = device.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<FrameGenParams>(), BindFlags.ConstantBuffer));
     }
 
@@ -122,6 +130,7 @@ public sealed class FrameGen : IDisposable
     {
         foreach (var t in _rgb.Concat(_luma).Concat(_flowRaw).Concat(_flow)) t?.Dispose();
         _out?.Dispose(); _out = null;
+        _scaled?.Dispose(); _scaled = null;
         _history?.Dispose(); _history = null; _hasHistory = false;
         _rgb = _luma = _flowRaw = _flow = Array.Empty<Target>();
     }
@@ -232,7 +241,7 @@ public sealed class FrameGen : IDisposable
             TexelX = 1f / _flow[_finest].W, TexelY = 1f / _flow[_finest].H,
         };
         // With sharp upscaling the picture is made at the game's size first, then scaled like a real frame.
-        bool viaOut = SharpUpscale && vp.Width > _w * 1.02f;
+        bool viaOut = Enhancing || (SharpUpscale && vp.Width > _w * 1.02f);
         if (viaOut) Pass(Out.Rtv, new Viewport(0, 0, _w, _h), _psInterp, p, _rgb[0].Srv, _rgb[1].Srv, _flow[_finest].Srv, _luma[0].Srv, _luma[1].Srv);
         else Pass(rtv, vp, _psInterp, p, _rgb[0].Srv, _rgb[1].Srv, _flow[_finest].Srv, _luma[0].Srv, _luma[1].Srv);
         if (viaOut) Blit(Out, rtv, vp);
@@ -241,7 +250,25 @@ public sealed class FrameGen : IDisposable
     void Blit(Target src, ID3D11RenderTargetView rtv, Viewport vp)
     {
         bool sharp = SharpUpscale && vp.Width > src.W * 1.02f;
-        Pass(rtv, vp, sharp ? _psScale : _psBlit, new FrameGenParams { TexelX = 1f / src.W, TexelY = 1f / src.H, Alpha = AntiRing }, src.Srv);
+        var scale = new FrameGenParams { TexelX = 1f / src.W, TexelY = 1f / src.H, Alpha = AntiRing };
+        if (!Enhancing) { Pass(rtv, vp, sharp ? _psScale : _psBlit, scale, src.Srv); return; }
+
+        // Scale to the on-screen size first, then enhance at that size.
+        int w = Math.Max(1, (int)MathF.Round(vp.Width)), h = Math.Max(1, (int)MathF.Round(vp.Height));
+        bool mips = Clarity > 0;
+        if (_scaled == null || _scaled.W != w || _scaled.H != h || _scaled.Tex.Description.Format != _format || (_scaled.Tex.Description.MipLevels != 1) != mips)
+        {
+            _scaled?.Dispose();
+            _scaled = Make(w, h, _format, mips);
+        }
+        Pass(_scaled, sharp ? _psScale : _psBlit, scale, src.Srv);
+        if (mips) _ctx.GenerateMips(_scaled.Srv);
+        Pass(rtv, vp, _psEnhance, new FrameGenParams
+        {
+            TexelX = 1f / w, TexelY = 1f / h, HdrOut = HdrOut ? 1 : 0,
+            Alpha = Sharp, Smooth = Deband, StaticBias = Clarity, EdgeCost = Vibrance,
+            Refine = h / 1080f, Lod = MathF.Max(0, MathF.Log2(h / 40f)),
+        }, _scaled.Srv);
     }
 
     /// <summary>Where the newest frame lives, to redraw it in place with new picture settings.</summary>
@@ -333,6 +360,6 @@ public sealed class FrameGen : IDisposable
     public void Dispose()
     {
         Free();
-        _cb.Dispose(); _psScale.Dispose(); _psBlit.Dispose(); _psInterp.Dispose(); _psMedian.Dispose(); _psMotion.Dispose(); _psLuma.Dispose(); _vs.Dispose();
+        _cb.Dispose(); _psEnhance.Dispose(); _psScale.Dispose(); _psBlit.Dispose(); _psInterp.Dispose(); _psMedian.Dispose(); _psMotion.Dispose(); _psLuma.Dispose(); _vs.Dispose();
     }
 }

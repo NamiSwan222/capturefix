@@ -33,7 +33,8 @@ static class Dump
         _ = form.Handle;
         using var r = new Renderer(form.Handle);
         r.Resize(960, 540);
-        r.Color = new ColorSettings { HdrMode = 2, RangeMode = 1 };
+        static float E(string n) => float.TryParse(Environment.GetEnvironmentVariable(n), System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
+        r.Color = new ColorSettings { HdrMode = 2, RangeMode = 1, Sharpness = E("CF_SHARP"), Deband = E("CF_DEBAND"), Clarity = E("CF_CLARITY"), Vibrance = E("CF_VIBRANCE") };
         string result;
         try { result = r.ScaleTest(f, int.Parse(a[6]), int.Parse(a[7]), a[8]); } catch (Exception ex) { result = "FAILED: " + ex; }
         File.WriteAllText(a[0], result);

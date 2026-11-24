@@ -142,6 +142,33 @@ instead of plain bilinear, for real and generated frames alike. Measured against
 picture at the same 1.33x factor: +1.3 dB on real GTA VI frames, +1.0 dB on a detailed photo, at
 0.04 ms a frame. `--scaletest` produces both versions of a saved frame.
 
+## Control bar and picture modes
+
+A bar under the picture holds the everyday controls: console, picture mode, smooth motion, signal,
+volume and mute, screenshot, full screen, settings, and "more" (the full menu). The arrow at its
+right end (or Tab) minimizes it: then nothing of it is on screen, and a small "Controls" tab shows
+up at the bottom only while the mouse moves, so a shared Discord window stays clean. In full screen
+the bar lies over the bottom of the picture and goes away when the mouse rests.
+
+Picture modes set four enhancers at once ([framegen.hlsl](src/CaptureFix/Shaders/framegen.hlsl),
+`PSEnhance`, run last at the size shown on screen):
+
+- **Sharpening**: contrast adaptive, the same idea as AMD CAS (the sharpening stage of FSR). Flat
+  areas and edges that are already strong are left alone, so there are no halos.
+- **Smooth gradients**: debanding. Nearly flat areas are averaged with their surroundings and get a
+  touch of noise, which removes the steps 8-bit video leaves in skies and fog. Detail is untouched.
+- **Clarity**: local contrast in the midtones, against a heavily blurred copy of the picture.
+- **Vibrance**: lifts weak colours only. Off in every mode.
+
+| Mode | Sharpening | Smooth gradients | Clarity | Also |
+|---|---|---|---|---|
+| Original | off | off | off | |
+| Balanced (default) | 35% | 60% | 12% | |
+| Ultra | 60% | 100% | 25% | sharp upscaling, frame generation |
+
+All of it costs 0.4 ms per picture at 3440x1935 on an RTX 5080, and the average colour of the
+picture does not move (checked on a real game frame).
+
 ## Wide-colour monitors (why everything looked too red)
 
 A console picture is made for standard colours (BT.709 / sRGB). QD-OLED and many gaming monitors
@@ -183,6 +210,7 @@ a time.
 
 | Key | |
 |---|---|
+| Tab | Hide or show the control bar |
 | Right-click | All options |
 | F11 / double-click / Alt+Enter | Full screen (Esc to leave) |
 | 1 / 2 | PS5 / Switch 2 profile |
@@ -198,7 +226,7 @@ a time.
 
 ## Settings (S)
 
-- **Picture:** frame generation (off / 2x / 3x / 4x) and its quality, sharp upscaling, wide-colour monitor conversion, signal (auto / HDR / SDR), brightness range (auto / limited / full), HDR colour style (Natural / Vivid), HDR brightness, HDR peak, contrast,
+- **Picture:** frame generation (off / 2x / 3x / 4x) and its quality, sharp upscaling, picture mode with sharpening / smooth gradients / clarity / vibrance, wide-colour monitor conversion, signal (auto / HDR / SDR), brightness range (auto / limited / full), HDR colour style (Natural / Vivid), HDR brightness, HDR peak, contrast,
   black level, colour, warmth, sharpness, gamma (2.2 / 2.4 dark room / 2.0 bright room), full range,
   real HDR on an HDR monitor.
 - **Sound:** output device, volume, mute, audio delay, restart audio.
