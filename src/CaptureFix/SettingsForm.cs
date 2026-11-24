@@ -108,9 +108,19 @@ public sealed class SettingsForm : Form
         Check(page, "Sharp upscaling", "When the window is bigger than the game picture (1080p on a 1440p or 4K screen), scale it up with a sharper filter. Edges and text come out crisper.",
             () => _s.SharpUpscale, v => { _s.SharpUpscale = v; ApplyPicture(); });
 
+        Check(page, "AI upscaling (NVIDIA RTX)", "NVIDIA's RTX Video Super Resolution redraws the picture at your screen size with AI: sharper edges, cleaner text and textures than any normal scaler. Needs an RTX graphics card with Super Resolution switched on in the NVIDIA app (System > Video > RTX Video Enhancement). SDR pictures only.",
+            () => _s.AiUpscale, v => { _s.AiUpscale = v; ApplyPicture(); });
+        var aiStatus = new Label { AutoSize = true, ForeColor = Accent, MaximumSize = new Size(520, 0), Margin = new Padding(0, 2, 0, 4) };
+        page.Controls.Add(aiStatus);
+        var aiTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        aiTimer.Tick += (_, _) => { if (page.Visible) aiStatus.Text = _main.AiStatus; };
+        aiTimer.Start();
+        Disposed += (_, _) => aiTimer.Dispose();
+        _loaders.Add(() => aiStatus.Text = _main.AiStatus);
+
         Section(page, "Picture mode");
         Choice(page, "Mode", new[] { "Original  (exactly what the console sends)", "Balanced  (a little sharper and cleaner)", "Ultra  (sharpest picture, smoothest motion)", "Custom  (your own slider values)" },
-            "One click for the four sliders below. Ultra also turns on sharp upscaling and frame generation. None of this changes the colors.",
+            "One click for the four sliders below. Ultra also turns on AI upscaling, sharp upscaling and frame generation. None of this changes the colors.",
             () => _main.CurrentPreset is >= 0 and var i ? i : 3, v => { if (v < 3) { _main.SetPreset(v); LoadValues(); } });
         Slider(page, "Sharpening", 0, 100, () => (int)Math.Round(P.Sharpness * 100), v => { P.Sharpness = v / 100f; ApplyPicture(); }, v => v == 0 ? "off" : $"{v}%",
             "Brings out fine detail and text. It adapts to the picture, so edges do not get halos.");

@@ -40,6 +40,26 @@ static class Dump
         File.WriteAllText(a[0], result);
     }
 
+    /// <summary>"--aitest out.txt a.raw b.raw w h pitch outW outH prefix": AI upscaling of an NV12 frame (b = the next frame).</summary>
+    public static void AiTest(string[] a)
+    {
+        VideoFrame Load(string p)
+        {
+            var f = new VideoFrame { Data = File.ReadAllBytes(p), Format = PixelFormat.NV12, Width = int.Parse(a[3]), Height = int.Parse(a[4]), Pitch = int.Parse(a[5]) };
+            f.Length = f.Data.Length; return f;
+        }
+        ApplicationConfiguration.Initialize();
+        using var form = new Form { ClientSize = new Size(960, 540), ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-4000, -4000) };
+        _ = form.Handle;
+        using var r = new Renderer(form.Handle);
+        static float E(string n) => float.TryParse(Environment.GetEnvironmentVariable(n), System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
+        r.Color = new ColorSettings { HdrMode = 2, RangeMode = int.TryParse(Environment.GetEnvironmentVariable("CF_RANGE"), out var rm) ? rm : 1, SharpUpscale = true,
+            Sharpness = E("CF_SHARP"), Deband = E("CF_DEBAND"), Clarity = E("CF_CLARITY"), Vibrance = E("CF_VIBRANCE") };
+        string result;
+        try { result = r.AiTest(Load(a[1]), Load(a[2]), int.Parse(a[6]), int.Parse(a[7]), a[8]); } catch (Exception ex) { result = "FAILED: " + ex; }
+        File.WriteAllText(a[0], result);
+    }
+
     /// <summary>"--fgseq out.txt dir [finestLevel] [pngWorst]": scores frame generation on consecutive real game frames
     /// saved by --cadence: for every k, makes the picture between g(k) and g(k+2) and compares it with g(k+1).</summary>
     public static void FrameGenSequence(string[] a)
@@ -94,7 +114,8 @@ static class Dump
         {
             using var r = new Renderer(form.Handle);
             r.Resize(form.ClientSize.Width, form.ClientSize.Height);
-            r.Color = new ColorSettings { FrameGen = factor, HdrMode = 2, RangeMode = 1, SharpUpscale = sharp, MonitorGamut = int.TryParse(Environment.GetEnvironmentVariable("CF_GAMUT"), out var gm) ? gm : 0 };
+            r.Color = new ColorSettings { FrameGen = factor, HdrMode = 2, RangeMode = 1, SharpUpscale = sharp, MonitorGamut = int.TryParse(Environment.GetEnvironmentVariable("CF_GAMUT"), out var gm) ? gm : 0,
+                AiUpscale = Environment.GetEnvironmentVariable("CF_AI") == "1", Sharpness = 0.6f, Deband = Environment.GetEnvironmentVariable("CF_AI") != null ? 1f : 0f, Clarity = Environment.GetEnvironmentVariable("CF_AI") != null ? 0.25f : 0f };
             using var cap = VideoCapture.StartSynthetic(new VideoMode(PixelFormat.NV12, 1920, 1080, 60, 1), frames, repeat);
             r.Source = cap;
             r.Start();
@@ -112,6 +133,7 @@ static class Dump
             sb.AppendLine("first pictures (alpha): " + string.Join(" ", log.Take(16).Select(x => x.alpha.ToString("0.##"))));
             sb.AppendLine($"shown at {r.ShownWidth}x{r.ShownHeight}, sharp scaling {(r.SharpScalingActive ? "on" : "off")}");
             sb.AppendLine($"monitor colour range {r.MonitorGamutRatio:0.00}x ({r.MonitorPrimaries}), Windows manages colour: {r.WindowsManagesColor}, correction {(r.GamutCorrectionActive ? "ON" : "off")}");
+            sb.AppendLine($"AI upscaling {(r.AiActive ? "ACTIVE" : "off")}{(r.AiProblem != null ? ": " + r.AiProblem : "")}");
             if (r.Error != null) sb.AppendLine("renderer error: " + r.Error);
             r.Source = null;
             File.WriteAllText(a[0], sb.ToString());

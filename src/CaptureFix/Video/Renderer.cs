@@ -32,6 +32,7 @@ public sealed class ColorSettings
     public float Deband;            // 0..1: smooths colour steps in skies and fog
     public float Clarity;           // 0..1: local contrast
     public float Vibrance;          // 0..1: lifts weak colours, leaves strong ones alone
+    public bool AiUpscale;          // NVIDIA RTX Video Super Resolution when the picture is shown larger than captured
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -64,6 +65,16 @@ public sealed class Renderer : IDisposable
     readonly ID3D11SamplerState _sampler;
     readonly ID3D11Buffer _cbuffer;
     readonly FrameGen _fg;
+    AiUpscaler? _ai;
+    bool _aiFailed;
+    ID3D11ShaderResourceView? _aiSrv;   // the newest frame, AI upscaled; null = not in use
+    int _cvW, _cvH;                     // size of the converted frame handed to frame generation
+    /// <summary>The AI upscaler made the picture now on screen.</summary>
+    public bool AiActive => _aiSrv != null;
+    /// <summary>Why AI upscaling is not running although it is switched on (null = no problem).</summary>
+    public string? AiProblem { get; private set; }
+    /// <summary>Testing: the driver's plain scaler instead of the AI.</summary>
+    public bool AiPlain;
 
     ID3D11Texture2D? _texY, _texUV;
     ID3D11ShaderResourceView? _srvY, _srvUV;
@@ -101,8 +112,14 @@ public sealed class Renderer : IDisposable
         _hwnd = hwnd;
         Signal.Changed += (h, f) => { _dirty = true; SignalDetected?.Invoke(h, f); };
         var levels = new[] { FeatureLevel.Level_11_1, FeatureLevel.Level_11_0 };
-        D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport, levels,
-            out _device, out _ctx).CheckError();
+        // Video support is for the AI upscaler; not every GPU driver has it.
+        if (D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport, levels,
+            out _device!, out _ctx!).Failure)
+        {
+            _aiFailed = true;
+            D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport, levels,
+                out _device, out _ctx).CheckError();
+        }
         using (var dxgiDevice = _device.QueryInterface<IDXGIDevice1>())
             dxgiDevice.MaximumFrameLatency = 1;
         _factory = DXGI.CreateDXGIFactory2<IDXGIFactory2>(false);
@@ -208,7 +225,7 @@ public sealed class Renderer : IDisposable
                     {
                         if (_fgShowing) ResetFrameGen();
                         Upload(frame);
-                        if (UpscalingNow() || _fg.Enhancing) { PushToFrameGen(); PresentGenerated(1f); }   // convert at game size, then scale and enhance
+                        if (UpscalingNow() || _fg.Enhancing || _aiSrv != null) { PushToFrameGen(); PresentGenerated(1f); }   // convert at game size, then scale and enhance
                         else Draw();
                         drew = true;
                         latencyAcc += (Stopwatch.GetTimestamp() - frame.ArrivedTicks) * 1000.0 / Stopwatch.Frequency;
@@ -306,7 +323,8 @@ public sealed class Renderer : IDisposable
     {
         var c = Color;
         _fg.SharpUpscale = c.SharpUpscale;
-        _fg.Sharp = Math.Clamp(c.Sharpness, 0, 1); _fg.Deband = Math.Clamp(c.Deband, 0, 1);
+        // The AI upscaler sharpens on its own; the full amount on top of it looks gritty.
+        _fg.Sharp = Math.Clamp(c.Sharpness, 0, 1) * (_aiSrv != null ? 0.5f : 1f); _fg.Deband = Math.Clamp(c.Deband, 0, 1);
         _fg.Clarity = Math.Clamp(c.Clarity, 0, 1); _fg.Vibrance = Math.Clamp(c.Vibrance, 0, 1);
     }
 
@@ -316,13 +334,13 @@ public sealed class Renderer : IDisposable
     void Redraw()
     {
         SyncEnhancers();
-        if (_haveFrame && _srvY != null && _fg.Enhancing && !(_fg.HasFrame && _fg.Width == _texW && _fg.Height == _texH))
+        if (_haveFrame && _srvY != null && (_fg.Enhancing || _aiSrv != null) && !(_fg.HasFrame && _fg.Width == _cvW && _fg.Height == _cvH))
             PushToFrameGen();
-        bool viaFrameGen = _haveFrame && _srvY != null && _fg.HasFrame && _fg.Width == _texW && _fg.Height == _texH
-                           && (_fgShowing || UpscalingNow() || _fg.Enhancing);
+        bool viaFrameGen = _haveFrame && _srvY != null && _fg.HasFrame && _fg.Width == _cvW && _fg.Height == _cvH
+                           && (_fgShowing || UpscalingNow() || _fg.Enhancing || _aiSrv != null);
         if (!viaFrameGen) { Draw(); return; }
         _fg.HdrOut = _hdrSwap;
-        DrawSource(_fg.NewestRtv, new Viewport(0, 0, _texW, _texH));
+        DrawSource(_fg.NewestRtv, new Viewport(0, 0, _cvW, _cvH));
         _fg.RefreshNewest();
         PresentGenerated(1f);
     }
@@ -533,7 +551,48 @@ public sealed class Renderer : IDisposable
                 break;
         }
         _haveFrame = true;
+        _cvW = f.Width; _cvH = f.Height;
+        _aiSrv = null;
+        if (Color.AiUpscale) TryAiUpscale(f);
+        else AiProblem = null;
     }
+
+    /// <summary>Runs the frame through the AI upscaler when everything it needs is there.</summary>
+    void TryAiUpscale(VideoFrame f)
+    {
+        if (_aiFailed) { AiProblem ??= "not available on this graphics card"; return; }
+        if (f.Format != PixelFormat.NV12 || EffectiveHdr) { AiProblem = "works with SDR pictures only"; return; }
+        var lb = Letterbox();
+        int ow = Math.Min((int)MathF.Round(lb.Width), 3840), oh = Math.Min((int)MathF.Round(lb.Height), 2160);
+        ow &= ~1; oh &= ~1;
+        if (ow < f.Width * 1.02f || f.Height > 1440) { AiProblem = "the picture is not shown larger than the console sends it"; return; }
+        // With the switch off the driver would only scale plainly, worse than our own scaler.
+        if (Environment.TickCount64 - _aiSwitchChecked > 3000)
+        {
+            _aiSwitchChecked = Environment.TickCount64;
+            _aiSwitchOff = !AiPlain && AiUpscaler.DriverSwitchOn() == false;
+        }
+        if (_aiSwitchOff) { AiProblem = "turn on Super Resolution in the NVIDIA app (System > Video > RTX Video Enhancement)"; return; }
+        try
+        {
+            if (_ai == null)
+            {
+                if (!AiUpscaler.IsNvidia(_device)) { _aiFailed = true; AiProblem = "needs an NVIDIA RTX graphics card"; return; }
+                _ai = new AiUpscaler(_device, _ctx) { Plain = AiPlain };
+            }
+            _aiSrv = _ai.Process(f, ow, oh, EffectiveFullRange);
+            _cvW = ow; _cvH = oh;
+            AiProblem = null;
+        }
+        catch (Exception ex)
+        {
+            _aiFailed = true; _aiSrv = null; _cvW = f.Width; _cvH = f.Height;
+            AiProblem = "the graphics driver refused it (" + ex.Message + ")";
+            _ai?.Dispose(); _ai = null;
+        }
+    }
+    long _aiSwitchChecked = -100000;
+    bool _aiSwitchOff;
 
     Viewport Letterbox()
     {
@@ -551,13 +610,13 @@ public sealed class Renderer : IDisposable
         var c = Color;
         var p = new ShaderParams
         {
-            Format = _texFormat == PixelFormat.YUY2 ? 1 : 0,
+            Format = _aiSrv != null ? 2 : _texFormat == PixelFormat.YUY2 ? 1 : 0,
             HdrIn = EffectiveHdr ? 1 : 0,
             HdrOut = _hdrSwap ? 1 : 0,
             FullRange = EffectiveFullRange ? 1 : 0,
             PeakIn = c.PeakNits, SdrPeak = c.SdrPeakNits, HdrSdrWhite = c.HdrSdrWhite,
             TenBit = _texFormat == PixelFormat.P010 ? 1 : 0,
-            TexW = _texW, TexH = _texH, Saturation = c.Saturation,
+            TexW = _aiSrv != null ? _cvW : _texW, TexH = _aiSrv != null ? _cvH : _texH, Saturation = c.Saturation,
             ToneMap = c.ToneMap, Contrast = c.Contrast, BlackLevel = c.BlackLevel, Gamma = c.Gamma,
             Warmth = c.Warmth, Sharpness = 0,   // sharpening now happens at the on-screen size (PSEnhance)
             GamutOn = GamutCorrectionActive ? 1 : 0,
@@ -570,7 +629,7 @@ public sealed class Renderer : IDisposable
         _ctx.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
         _ctx.VSSetShader(_vs);
         _ctx.PSSetShader(_ps);
-        _ctx.PSSetShaderResources(0, new[] { _srvY!, _srvUV ?? _srvY! });
+        _ctx.PSSetShaderResources(0, _aiSrv != null ? new[] { _aiSrv, _aiSrv } : new[] { _srvY!, _srvUV ?? _srvY! });
         _ctx.PSSetSampler(0, _sampler);
         _ctx.PSSetConstantBuffer(0, _cbuffer);
         _ctx.Draw(3, 0);
@@ -582,8 +641,8 @@ public sealed class Renderer : IDisposable
     void PushToFrameGen()
     {
         _fg.HdrOut = _hdrSwap;
-        var rtv = _fg.BeginFrame(_texW, _texH, SwapFormat);
-        DrawSource(rtv, new Viewport(0, 0, _texW, _texH));
+        var rtv = _fg.BeginFrame(_cvW, _cvH, SwapFormat);
+        DrawSource(rtv, new Viewport(0, 0, _cvW, _cvH));
         _fg.EndFrame();
     }
 
@@ -689,6 +748,56 @@ public sealed class Renderer : IDisposable
         return res;
     }
 
+    /// <summary>Testing: the same frame at w x h through our own scaler, the driver's plain scaler and the AI
+    /// upscaler. Saves all three, compares their average colours and times the AI and frame generation.</summary>
+    public string AiTest(VideoFrame f, VideoFrame f2, int w, int h, string outPrefix)
+    {
+        for (int i = 0; i < 150; i++) Signal.Analyze(f, force: true);
+        Resize(w, h);
+        UpdateOutputMode();
+        ResizeSwapChain(); _resize = false;
+        var sb = new System.Text.StringBuilder();
+        static string Mean(byte[] b)
+        {
+            double r = 0, g = 0, bl = 0; int n = b.Length / 4;
+            for (int i = 0; i < b.Length; i += 4) { bl += b[i]; g += b[i + 1]; r += b[i + 2]; }
+            return $"mean RGB {r / n:0.00} {g / n:0.00} {bl / n:0.00}";
+        }
+        var c = Color;
+        c.AiUpscale = false; SyncEnhancers();
+        _fg.Reset(); Upload(f); PushToFrameGen();
+        byte[] own = _fg.ReadScaled(w, h, true);
+        SavePng(outPrefix + "_own.png", own, w, h);
+        sb.AppendLine($"own scaler      {Mean(own)}");
+        _fg.Reset(); Upload(f); PushToFrameGen(); Upload(f2); PushToFrameGen();
+        sb.AppendLine($"frame generation at {_fg.Width}x{_fg.Height}: {_fg.Benchmark():0.00} ms per generated picture");
+
+        c.AiUpscale = true; AiPlain = true;
+        _fg.Reset(); Upload(f); PushToFrameGen();
+        if (!AiActive) return sb + "AI path not active: " + AiProblem;
+        byte[] plain = _fg.ReadNewest();
+        SavePng(outPrefix + "_plain.png", plain, _fg.Width, _fg.Height);
+        sb.AppendLine($"driver, AI off  {Mean(plain)}   ({_fg.Width}x{_fg.Height}, {(_ai!.TenBit ? "10" : "8")} bit)");
+
+        _ai.Dispose(); _ai = null; AiPlain = false;
+        _fg.Reset(); Upload(f); PushToFrameGen();
+        byte[] ai = _fg.ReadNewest();
+        SavePng(outPrefix + "_ai.png", ai, _fg.Width, _fg.Height);
+        long diff = 0; for (int i = 0; i < ai.Length; i++) diff += Math.Abs(ai[i] - plain[i]);
+        sb.AppendLine($"driver, AI on   {Mean(ai)}   differs from AI off by {diff / (double)ai.Length:0.000} per value");
+        var sw = Stopwatch.StartNew();
+        for (int i = 0; i < 60; i++) { Upload((i & 1) == 0 ? f : f2); PushToFrameGen(); }
+        _fg.ReadNewest();
+        sb.AppendLine($"AI upscale + convert: {sw.Elapsed.TotalMilliseconds / 60:0.00} ms per game frame");
+        sb.AppendLine($"frame generation at {_fg.Width}x{_fg.Height}: {_fg.Benchmark():0.00} ms per generated picture");
+        SyncEnhancers();
+        byte[] shown = _fg.ReadScaled(w, h, true);
+        SavePng(outPrefix + "_ai_enhanced.png", shown, w, h);
+        sb.AppendLine($"AI + enhancers  {Mean(shown)}");
+        sb.AppendLine($"problem: {AiProblem ?? "none"}; driver switch: {AiUpscaler.DriverSwitchOn()}");
+        return sb.ToString();
+    }
+
     /// <summary>Testing: draws one frame without the render thread and saves exactly what would be shown.</summary>
     public void RenderOnce(VideoFrame f, string pngPath)
     {
@@ -777,6 +886,7 @@ public sealed class Renderer : IDisposable
         _wake.Set();
         _thread?.Join(1000);
         _fg.Dispose();
+        _ai?.Dispose();
         _srvY?.Dispose(); _srvUV?.Dispose(); _texY?.Dispose(); _texUV?.Dispose();
         _rtv?.Dispose(); _swap?.Dispose();
         _cbuffer.Dispose(); _sampler.Dispose(); _ps.Dispose(); _vs.Dispose();

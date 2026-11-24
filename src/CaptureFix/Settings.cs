@@ -47,6 +47,7 @@ public sealed class AppSettings
     public bool StartFullscreen { get; set; }
     public bool ShowTips { get; set; } = true;
     public bool SharpUpscale { get; set; } = true;
+    public bool AiUpscale { get; set; }             // NVIDIA RTX Video Super Resolution
     public bool BarMinimized { get; set; }          // the on-screen control bar is hidden until the mouse moves
     public int MonitorGamut { get; set; }           // wide-colour monitor correction: 0 = automatic, 1 = on, 2 = off
     public bool AutoUpdate { get; set; } = true;

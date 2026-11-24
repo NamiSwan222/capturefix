@@ -16,7 +16,7 @@ SamplerState Linear : register(s0);
 
 cbuffer Params : register(b0)
 {
-    int   Format;       // 0 = planar (NV12/P010), 1 = YUY2
+    int   Format;       // 0 = planar (NV12/P010), 1 = YUY2, 2 = t0 is RGB (AI upscaled, BT.709 full range)
     int   HdrIn;        // 1 = signal is HDR10 (PQ + BT.2020)
     int   HdrOut;       // 1 = swap chain is scRGB (FP16, 1.0 = 80 nits)
     int   FullRange;    // 1 = full range YCbCr (0-255), 0 = limited/TV range (16-235)
@@ -105,6 +105,14 @@ float3 LinearToSrgb(float3 c) { return pow(saturate(c), 1.0 / 2.2); }
 float3 SampleYCbCr(float2 uv)
 {
     float y, cb, cr;
+    if (Format == 2)
+    {
+        // Already converted and range-expanded by the AI upscaler. Back to Y, Cb, Cr so the rest
+        // of the shader treats it exactly like a picture from the card.
+        float3 rgb = PlaneY.Sample(Linear, uv).rgb;
+        y = Luma709(rgb);
+        return float3(y, (rgb.b - y) / 1.8556, (rgb.r - y) / 1.5748);
+    }
     if (Format == 1)
     {
         // YUY2: each texel is two pixels. Nearest pixel for luma, shared chroma.

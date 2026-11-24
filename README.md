@@ -197,10 +197,24 @@ not possible here: they can only happen inside the game on the console. What the
 finished picture is what CaptureFix does: frame generation, sharp upscaling, HDR tone mapping,
 sharpening and colour controls.
 
-NVIDIA's RTX Video Super Resolution (AI upscaling) was tried through the Direct3D video processor
-extension. On the test PC the driver accepted the request but returned exactly the same picture
-with it on and off, so it is not used. It probably needs "RTX Video Enhancement" switched on in the
-NVIDIA app; untested with that on.
+## AI upscaling (NVIDIA RTX Video Super Resolution)
+
+On an NVIDIA RTX card, CaptureFix can hand each picture to the driver's AI upscaler, the one browsers
+and video players use ([RtxVideo.cs](src/CaptureFix/Video/RtxVideo.cs)). It redraws the 1080p picture
+at the size shown on screen: edges, text and fine textures come out cleaner than with any normal scaler.
+
+![Before and after](docs/ai-upscaling.png)
+
+- Turn it on in the Picture menu of the control bar or in Settings > Picture. Ultra mode turns it on.
+- **It needs "Super Resolution" switched on in the NVIDIA app** (System > Video > RTX Video Enhancement).
+  With the switch off the driver silently returns a plain upscale, so CaptureFix reads the switch and
+  uses its own sharp scaler instead, and says so in the Picture menu.
+- SDR pictures only, and only when the picture is shown larger than the console sends it.
+- Colours stay the same: the driver's result is converted back to Y, Cb, Cr and goes through the
+  same colour code as a picture straight from the card (average colour within 0.2 of 255).
+- Cost on an RTX 5080, 1080p to 3440x1934: about 6 ms per game frame. Frame generation then works
+  on the big picture (2.1 ms per generated picture instead of 1.0).
+- Sharpening runs at half strength while the AI is active, because the AI sharpens on its own.
 
 ## Use
 

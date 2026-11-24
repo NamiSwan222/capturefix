@@ -300,6 +300,9 @@ sealed class ControlBar : Control
             }
             if (cur < 0) m.Add(new ToolStripMenuItem("Custom (your own slider values)") { Checked = true, Enabled = false });
             m.Add(new ToolStripSeparator());
+            m.Add(new ToolStripMenuItem("AI upscaling (NVIDIA RTX)", null, (_, _) => _m.SetAiUpscale(!_m.AiUpscale)) { Checked = _m.AiUpscale });
+            if (_m.AiUpscale) m.Add(new ToolStripMenuItem(_m.AiStatus) { Enabled = false });
+            m.Add(new ToolStripSeparator());
             m.Add(new ToolStripMenuItem("All picture settings…", null, (_, _) => _m.OpenSettings(0)) { ShortcutKeyDisplayString = "A" });
         });
         _motion.Click += (_, _) => Drop(_motion, m =>

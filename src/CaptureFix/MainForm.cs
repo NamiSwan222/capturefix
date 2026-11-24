@@ -238,7 +238,7 @@ public sealed class MainForm : Form
             Saturation = p.Saturation, HdrSdrWhite = _s.HdrSdrWhite, AllowHdrOutput = _s.AllowHdrOutput,
             ToneMap = p.ToneMap, Contrast = p.Contrast, BlackLevel = p.BlackLevel, Gamma = p.Gamma,
             Warmth = p.Warmth, Sharpness = p.Sharpness,
-            FrameGen = p.FrameGen, FrameGenQuality = p.FrameGenQuality, SharpUpscale = _s.SharpUpscale, MonitorGamut = _s.MonitorGamut,
+            FrameGen = p.FrameGen, FrameGenQuality = p.FrameGenQuality, SharpUpscale = _s.SharpUpscale, AiUpscale = _s.AiUpscale, MonitorGamut = _s.MonitorGamut,
             Deband = p.Deband, Clarity = p.Clarity, Vibrance = p.Vibrance,
         };
         _renderer.Invalidate();
@@ -352,6 +352,7 @@ public sealed class MainForm : Form
         {
             // Ultra also turns on everything else that improves the picture.
             _s.SharpUpscale = true;
+            _s.AiUpscale = true;
             p.FrameGenQuality = 1;
             if (p.FrameGen < 2) p.FrameGen = 2;
         }
@@ -361,7 +362,7 @@ public sealed class MainForm : Form
         {
             0 => "Picture: Original. Nothing is added to what the console sends.",
             1 => "Picture: Balanced. Light sharpening and smoother skies.",
-            _ => $"Picture: Ultra. Sharp upscaling, adaptive sharpening, smooth gradients, extra clarity, frame generation {p.FrameGen}x.",
+            _ => $"Picture: Ultra. AI upscaling, adaptive sharpening, smooth gradients, extra clarity, frame generation {p.FrameGen}x.",
         });
         Changed();
     }
@@ -379,6 +380,30 @@ public sealed class MainForm : Form
         _ => "SDR",
     };
 
+    public bool AiUpscale => _s.AiUpscale;
+
+    public void SetAiUpscale(bool on)
+    {
+        _s.AiUpscale = on;
+        _s.Save();
+        ApplyColor();
+        Toast(on ? "AI upscaling on (NVIDIA RTX Video Super Resolution)." : "AI upscaling off.");
+        Changed();
+    }
+
+    /// <summary>What the AI upscaler is doing right now, in plain words.</summary>
+    public string AiStatus
+    {
+        get
+        {
+            var r = _renderer;
+            if (!_s.AiUpscale) return "Off.";
+            if (r == null) return "On. Waiting for the capture card.";
+            if (r.AiActive) return $"Working: the NVIDIA AI draws the picture at {r.ShownWidth}x{r.ShownHeight}.";
+            return r.AiProblem != null ? "Not working now: " + r.AiProblem + "." : "On. Waiting for a picture.";
+        }
+    }
+
     public string BarStatus
     {
         get
@@ -388,7 +413,7 @@ public sealed class MainForm : Form
             long last = Math.Max(cap.LastFrameTicks, cap.StartedTicks);
             if ((Stopwatch.GetTimestamp() - last) / (double)Stopwatch.Frequency > 2) return "No signal";
             string s = $"{cap.Mode.Width}x{cap.Mode.Height}";
-            if (r.ShownWidth > cap.Mode.Width * 1.02) s += $" → {r.ShownWidth}x{r.ShownHeight}";
+            if (r.ShownWidth > cap.Mode.Width * 1.02) s += $" → {r.ShownWidth}x{r.ShownHeight}{(r.AiActive ? " AI" : "")}";
             if (r.FrameGenFactor >= 2) s += $"   ·   {r.GameFps:0} → {r.PresentFps:0} fps";
             else if (r.GameFps >= 1) s += $"   ·   {r.GameFps:0} fps";
             return s;
@@ -891,7 +916,7 @@ public sealed class MainForm : Form
             lines.Add($"{_renderer.PresentFps:0.0} fps  ·  card to screen {_renderer.LatencyMs:0.0} ms (+ display)");
             lines.Add("Frame generation: " + FrameGenStatus);
             lines.Add("Monitor: " + MonitorColorStatus);
-            lines.Add($"Scaling {cap.Mode.Width}x{cap.Mode.Height} to {_renderer.ShownWidth}x{_renderer.ShownHeight}: {(_renderer.SharpScalingActive ? "sharp (bicubic)" : "plain")}");
+            lines.Add($"Scaling {cap.Mode.Width}x{cap.Mode.Height} to {_renderer.ShownWidth}x{_renderer.ShownHeight}: {(_renderer.AiActive ? "NVIDIA AI (RTX Video Super Resolution)" : _renderer.SharpScalingActive ? "sharp (bicubic)" : "plain")}{(_s.AiUpscale && !_renderer.AiActive && _renderer.AiProblem != null ? "  ·  AI: " + _renderer.AiProblem : "")}");
             string hdrSrc = p.HdrMode == 0 ? "auto" : "set", rngSrc = p.RangeMode == 0 ? "auto" : "set";
             lines.Add($"Signal {(_renderer.EffectiveHdr ? "HDR10" : "SDR")} ({hdrSrc}), {(_renderer.EffectiveFullRange ? "full" : "limited")} range ({rngSrc}); black {_renderer.Signal.BlackCode}, white {_renderer.Signal.WhiteCode}  ·  output {(_renderer.OutputIsHdr ? "HDR (scRGB)" : "SDR")}{(_renderer.MonitorHdr ? ", monitor in HDR" : "")}");
             lines.Add($"Audio {_audio.InputName ?? "-"} → {_audio.OutputName ?? "-"}  ·  buffer {_audio.BufferedMs:0}/{_audio.DelayMs} ms  ·  speed {_audio.SpeedPercent:+0.00;-0.00}%  ·  gaps {_audio.Underruns} (cushion +{_audio.ExtraMs} ms)");
